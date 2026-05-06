@@ -167,6 +167,11 @@ AnalysisResult StatisticalAnalyzer::analyzeTimeSeries(
     // Analizar el ultimo extracto como base
     result = analyze(extractos.back());
 
+    // NUEVO: metricas avanzadas (CFO-grade)
+    FinanceConfig cfg = FinanceConfig::load("data/finance_config.json");
+    cfg.print();
+    result.avanzadas = computeAdvanced(extractos.back(), extractos, cfg);
+
     // Construir serie temporal
     for (const auto& ext : extractos) {
         std::map<std::string, double> point;
@@ -280,5 +285,340 @@ json AnalysisResult::to_json() const {
     }
     j["alertas"] = alertas_arr;
 
+    j["avanzadas"] = avanzadas.to_json();
     return j;
+}
+
+// ==========================================================================
+// AdvancedMetrics::to_json
+// ==========================================================================
+nlohmann::json AdvancedMetrics::to_json() const {
+    json j;
+    j["yield_ponderado_pct"]        = yield_ponderado_pct;
+    j["yield_facial_ponderado_pct"] = yield_facial_ponderado_pct;
+    j["spread_promedio_pct"]        = spread_promedio_pct;
+    j["duracion_macaulay_anos"]     = duracion_macaulay_anos;
+    j["duracion_modificada"]        = duracion_modificada;
+    j["hhi"]                        = hhi;
+    j["hhi_categoria"]              = hhi_categoria;
+    j["top1_exposure_pct"]          = top1_exposure_pct;
+    j["top3_exposure_pct"]          = top3_exposure_pct;
+    j["top5_exposure_pct"]          = top5_exposure_pct;
+    j["vencimientos_buckets"]       = vencimientos_buckets;
+    j["vencimientos_count"]         = vencimientos_count;
+    j["dias_promedio_vencimiento"]  = dias_promedio_vencimiento;
+    j["spread_por_cdt_pct"]         = spread_por_cdt_pct;
+    j["sharpe_fic"]                 = sharpe_fic;
+    j["rentab_fic_anual_pct"]       = rentab_fic_anual_pct;
+    j["sigma_fic_pct"]              = sigma_fic_pct;
+    j["max_drawdown_pct"]           = max_drawdown_pct;
+    j["current_drawdown_pct"]       = current_drawdown_pct;
+    j["crecimiento_periodo_pct"]    = crecimiento_periodo_pct;
+    j["crecimiento_anualizado_pct"] = crecimiento_anualizado_pct;
+    j["retorno_real_pct"]           = retorno_real_pct;
+    j["skewness_tasas"]             = skewness_tasas;
+    j["kurtosis_tasas"]             = kurtosis_tasas;
+    j["cv_tasas"]                   = cv_tasas;
+    j["ci95_lower"]                 = ci95_lower;
+    j["ci95_upper"]                 = ci95_upper;
+    j["config"] = {
+        {"tasa_libre_riesgo", config_usada.tasa_libre_riesgo},
+        {"inflacion_anual",   config_usada.inflacion_anual},
+        {"benchmark_rendto",  config_usada.benchmark_rendto},
+    };
+    return j;
+}
+
+// ==========================================================================
+// HELPERS DE FINANZAS
+// Cada formula esta documentada con su definicion matematica.
+// ==========================================================================
+
+// Asimetria (skewness) - g1 de Fisher.
+// g1 = (1/n) * Σ((xᵢ - μ)/σ)³
+// > 0: cola larga a la derecha (valores altos atipicos)
+// < 0: cola larga a la izquierda
+double StatisticalAnalyzer::skewness(const std::vector<double>& x) {
+    if (x.size() < 3) return 0.0;
+    double m = mean(x);
+    double s = stdDev(x);
+    if (s == 0) return 0.0;
+    double acc = 0;
+    for (double v : x) {
+        double z = (v - m) / s;
+        acc += z * z * z;
+    }
+    return acc / x.size();
+}
+
+// Curtosis (Fisher, exceso sobre normal). Normal = 0.
+// kurt = (1/n) * Σ((xᵢ - μ)/σ)⁴ - 3
+// > 0: leptocurtica (colas pesadas, mas extremos)
+// < 0: platicurtica (colas ligeras)
+double StatisticalAnalyzer::kurtosis(const std::vector<double>& x) {
+    if (x.size() < 4) return 0.0;
+    double m = mean(x);
+    double s = stdDev(x);
+    if (s == 0) return 0.0;
+    double acc = 0;
+    for (double v : x) {
+        double z = (v - m) / s;
+        acc += z * z * z * z;
+    }
+    return (acc / x.size()) - 3.0;
+}
+
+// Maximum Drawdown sobre una serie de valores de portafolio.
+// MDD = max sobre t de  (max_acumulado_hasta_t - V_t) / max_acumulado_hasta_t
+// Se devuelve como NEGATIVO (-0.15 = caida 15% desde el pico).
+double StatisticalAnalyzer::maxDrawdown(const std::vector<double>& serie) {
+    if (serie.size() < 2) return 0.0;
+    double peak = serie.front();
+    double mdd  = 0.0;
+    for (double v : serie) {
+        if (v > peak) peak = v;
+        if (peak > 0) {
+            double dd = (v - peak) / peak;  // <= 0
+            if (dd < mdd) mdd = dd;
+        }
+    }
+    return mdd * 100.0;  // como porcentaje, negativo
+}
+
+// Sharpe Ratio = (r - r_f) / σ
+// Mide rendimiento por unidad de riesgo. > 1 considerado bueno; > 2 muy bueno.
+double StatisticalAnalyzer::sharpeRatio(double r, double sigma, double rf) {
+    if (sigma == 0) return 0.0;
+    return (r - rf) / sigma;
+}
+
+// Retorno real con formula de Fisher: (1 + nominal) / (1 + inflacion) - 1
+// Mas exacta que la simple resta cuando nominal o inflacion son altos.
+double StatisticalAnalyzer::realReturnFisher(double nominal, double inflacion) {
+    return (1.0 + nominal) / (1.0 + inflacion) - 1.0;
+}
+
+// Dias entre dos fechas en formato ISO YYYY-MM-DD. Devuelve 0 si no parseable.
+int StatisticalAnalyzer::diasEntreFechasISO(const std::string& a,
+                                             const std::string& b) {
+    auto parse = [](const std::string& s, std::tm& out) -> bool {
+        if (s.size() < 10) return false;
+        try {
+            out.tm_year = std::stoi(s.substr(0, 4)) - 1900;
+            out.tm_mon  = std::stoi(s.substr(5, 2)) - 1;
+            out.tm_mday = std::stoi(s.substr(8, 2));
+            out.tm_hour = out.tm_min = out.tm_sec = 0;
+            out.tm_isdst = 0;
+            return true;
+        } catch (...) { return false; }
+    };
+    std::tm ta = {}, tb = {};
+    if (!parse(a, ta) || !parse(b, tb)) return 0;
+    std::time_t t1 = std::mktime(&ta);
+    std::time_t t2 = std::mktime(&tb);
+    if (t1 == -1 || t2 == -1) return 0;
+    return static_cast<int>(std::difftime(t2, t1) / (60 * 60 * 24));
+}
+
+// ==========================================================================
+// computeAdvanced - calcula todas las metricas avanzadas del extracto actual
+// ==========================================================================
+AdvancedMetrics StatisticalAnalyzer::computeAdvanced(
+    const ExtractoCompleto& extracto,
+    const std::vector<ExtractoCompleto>& serie,
+    const FinanceConfig& cfg) {
+
+    AdvancedMetrics m;
+    m.config_usada = cfg;
+
+    // ---------- 1. Yield ponderado y spread ----------
+    double total_rf = 0.0;
+    for (const auto& cdt : extracto.renta_fija) total_rf += cdt.valor_mercado;
+
+    if (total_rf > 0) {
+        double yv = 0.0, yf = 0.0;
+        for (const auto& cdt : extracto.renta_fija) {
+            double w = cdt.valor_mercado / total_rf;
+            yv += w * cdt.tasa_valoracion;
+            yf += w * cdt.tasa_facial;
+            m.spread_por_cdt_pct[cdt.nemotecnico] =
+                cdt.tasa_valoracion - cdt.tasa_facial;
+        }
+        m.yield_ponderado_pct        = yv;
+        m.yield_facial_ponderado_pct = yf;
+        m.spread_promedio_pct        = yv - yf;
+    }
+
+    // ---------- 2. Duracion (Macaulay simplificada) ----------
+    // tᵢ = días desde "hoy" hasta vencimiento / 365
+    // wᵢ = market_value / total_RF
+    // Macaulay = Σ wᵢ × tᵢ
+    // Modificada = Macaulay / (1 + yield)
+    if (total_rf > 0) {
+        std::time_t now = std::time(nullptr);
+        std::tm* tm_now = std::localtime(&now);
+        char today_buf[11];
+        std::strftime(today_buf, sizeof(today_buf), "%Y-%m-%d", tm_now);
+        std::string today = today_buf;
+
+        double mac = 0.0;
+        for (const auto& cdt : extracto.renta_fija) {
+            int dias = diasEntreFechasISO(today, cdt.fecha_vencimiento);
+            if (dias < 0) dias = 0;
+            double t  = dias / 365.0;
+            double w  = cdt.valor_mercado / total_rf;
+            mac += w * t;
+        }
+        m.duracion_macaulay_anos = mac;
+        double y = m.yield_ponderado_pct / 100.0;
+        m.duracion_modificada = (1 + y) > 0 ? mac / (1 + y) : 0;
+    }
+
+    // ---------- 3. HHI y Top-N ----------
+    // HHI = Σ(wᵢ²) × 10000  con wᵢ = participacion del holding en el portafolio total
+    std::vector<double> holdings_valor;
+    for (const auto& cdt    : extracto.renta_fija)      holdings_valor.push_back(cdt.valor_mercado);
+    for (const auto& fondo  : extracto.fondos)          holdings_valor.push_back(fondo.nuevo_saldo);
+    for (const auto& saldo  : extracto.saldos_efectivo) holdings_valor.push_back(saldo.saldo_total);
+
+    double total_port = 0.0;
+    for (double v : holdings_valor) total_port += v;
+    if (total_port > 0) {
+        double hhi = 0.0;
+        for (double v : holdings_valor) {
+            double w = v / total_port;
+            hhi += w * w;
+        }
+        m.hhi = hhi * 10000.0;
+        if      (m.hhi < cfg.hhi_bajo)  m.hhi_categoria = "bajo";
+        else if (m.hhi < cfg.hhi_alto)  m.hhi_categoria = "moderado";
+        else                            m.hhi_categoria = "alto";
+
+        std::sort(holdings_valor.begin(), holdings_valor.end(), std::greater<double>());
+        if (holdings_valor.size() >= 1)
+            m.top1_exposure_pct = (holdings_valor[0] / total_port) * 100;
+        double sum3 = 0;
+        for (size_t i = 0; i < std::min<size_t>(3, holdings_valor.size()); ++i) sum3 += holdings_valor[i];
+        m.top3_exposure_pct = (sum3 / total_port) * 100;
+        double sum5 = 0;
+        for (size_t i = 0; i < std::min<size_t>(5, holdings_valor.size()); ++i) sum5 += holdings_valor[i];
+        m.top5_exposure_pct = (sum5 / total_port) * 100;
+    }
+
+    // ---------- 4. Vencimientos por bucket ----------
+    std::time_t now = std::time(nullptr);
+    std::tm* tm_now = std::localtime(&now);
+    char today_buf[11];
+    std::strftime(today_buf, sizeof(today_buf), "%Y-%m-%d", tm_now);
+    std::string today = today_buf;
+
+    auto label_for = [&](int dias) -> std::string {
+        if (dias < cfg.dias_corto)  return "<" + std::to_string(cfg.dias_corto) + "d";
+        if (dias < cfg.dias_medio)  return std::to_string(cfg.dias_corto) + "-" +
+                                            std::to_string(cfg.dias_medio) + "d";
+        if (dias < cfg.dias_largo)  return std::to_string(cfg.dias_medio) + "d-" +
+                                            std::to_string(cfg.dias_largo / 365) + "a";
+        return ">" + std::to_string(cfg.dias_largo / 365) + "a";
+    };
+
+    double weighted_dias = 0.0;
+    for (const auto& cdt : extracto.renta_fija) {
+        int dias = diasEntreFechasISO(today, cdt.fecha_vencimiento);
+        if (dias < 0) dias = 0;
+        std::string b = label_for(dias);
+        m.vencimientos_buckets[b] += cdt.valor_mercado;
+        m.vencimientos_count[b]   += 1;
+        if (total_rf > 0) weighted_dias += (cdt.valor_mercado / total_rf) * dias;
+    }
+    m.dias_promedio_vencimiento = weighted_dias;
+
+    // ---------- 5. FIC: Sharpe y rentabilidad ----------
+    if (!extracto.fondos.empty()) {
+        const auto& f = extracto.fondos.front();
+        // Si esta presente "Ultimo Año" lo usamos; sino "12m" o el promedio
+        double r_anual = 0.0;
+        for (const auto& [k, v] : f.rentabilidades_historicas) {
+            std::string lk = k;
+            for (auto& c : lk) c = static_cast<char>(std::tolower(c));
+            if (lk.find("ano") != std::string::npos ||
+                lk.find("ultimo año") != std::string::npos ||
+                lk.find("ultimo ano") != std::string::npos) {
+                r_anual = v;  // ya viene en %
+                break;
+            }
+        }
+        if (r_anual == 0 && !f.rentabilidades_historicas.empty()) {
+            // promedio
+            double s = 0; int n = 0;
+            for (const auto& [_, v] : f.rentabilidades_historicas) { s += v; ++n; }
+            if (n) r_anual = s / n;
+        }
+        // Sigma del FIC: sigma de la dispersion de las rentabilidades historicas
+        // (proxy razonable cuando no hay serie completa)
+        std::vector<double> rents;
+        for (const auto& [_, v] : f.rentabilidades_historicas) rents.push_back(v);
+        double sigma = stdDev(rents);
+
+        m.rentab_fic_anual_pct = r_anual;
+        m.sigma_fic_pct        = sigma;
+        m.sharpe_fic = sharpeRatio(r_anual / 100.0, sigma / 100.0,
+                                    cfg.tasa_libre_riesgo);
+    }
+
+    // ---------- 6. Drawdown sobre serie temporal ----------
+    if (serie.size() >= 2) {
+        std::vector<double> totales;
+        for (const auto& e : serie)
+            if (e.resumen.total_portafolio > 0)
+                totales.push_back(e.resumen.total_portafolio);
+        if (totales.size() >= 2) {
+            m.max_drawdown_pct = maxDrawdown(totales);
+            // current drawdown: caida desde max acumulado hasta el ultimo punto
+            double peak = totales.front();
+            for (double v : totales) if (v > peak) peak = v;
+            m.current_drawdown_pct = peak > 0
+                ? ((totales.back() - peak) / peak) * 100.0
+                : 0.0;
+
+            double inicio = totales.front();
+            double fin    = totales.back();
+            if (inicio > 0) {
+                m.crecimiento_periodo_pct = ((fin / inicio) - 1.0) * 100.0;
+                // Anualizado asumiendo serie mensual: n meses = totales.size()
+                double n_meses = static_cast<double>(totales.size() - 1);
+                if (n_meses > 0) {
+                    double anos = n_meses / 12.0;
+                    m.crecimiento_anualizado_pct =
+                        (std::pow(fin / inicio, 1.0 / anos) - 1.0) * 100.0;
+                }
+            }
+        }
+    }
+
+    // ---------- 7. Retorno real (Fisher) ----------
+    // Usa la rentabilidad anualizada del portafolio si la calculamos,
+    // sino la del FIC como proxy
+    double r_nom = m.crecimiento_anualizado_pct != 0
+                     ? m.crecimiento_anualizado_pct / 100.0
+                     : m.rentab_fic_anual_pct / 100.0;
+    m.retorno_real_pct = realReturnFisher(r_nom, cfg.inflacion_anual) * 100.0;
+
+    // ---------- 8. Estadistica avanzada sobre tasas de valoracion ----------
+    std::vector<double> tasas_v;
+    for (const auto& cdt : extracto.renta_fija)
+        tasas_v.push_back(cdt.tasa_valoracion);
+
+    if (tasas_v.size() >= 2) {
+        double mu    = mean(tasas_v);
+        double sigma = stdDev(tasas_v);
+        m.skewness_tasas = skewness(tasas_v);
+        m.kurtosis_tasas = kurtosis(tasas_v);
+        m.cv_tasas       = mu != 0 ? sigma / mu : 0;
+        // IC 95% con t aprox = 1.96 (para n grande); razonable para n>=4 con margen
+        double margen = 1.96 * sigma / std::sqrt(static_cast<double>(tasas_v.size()));
+        m.ci95_lower = mu - margen;
+        m.ci95_upper = mu + margen;
+    }
+
+    return m;
 }

@@ -1,357 +1,304 @@
 #include "ocr_extractor.h"
-#include <nlohmann/json.hpp>
+#include <cstdio>
+#include <cstdlib>
+#include <sstream>
+#include <fstream>
 #include <filesystem>
 #include <iostream>
-#include <sstream>
-#include <cstring>
-#include <csignal>
-
-// Para pipes bidireccionales (POSIX/Linux)
-#include <unistd.h>
-#include <sys/wait.h>
+#include <array>
+#include <algorithm>
+#include <cctype>
 
 namespace fs = std::filesystem;
-using json = nlohmann::json;
 
-OCRExtractor::OCRExtractor()
-    : temp_dir_("output/images/temp_ocr"),
-      python_script_path_("python/ocr_helper.py") {
-    fs::create_directories(temp_dir_);
+// =============================================================
+// Helper: ejecutar comando y capturar stdout (igual que pdf_processor)
+// Usa popen en Linux/macOS y _popen en Windows MSVC.
+// =============================================================
+#ifdef _WIN32
+  #define POPEN  _popen
+  #define PCLOSE _pclose
+#else
+  #define POPEN  popen
+  #define PCLOSE pclose
+#endif
+
+static std::string execAndCapture(const std::string& cmd) {
+    std::string full = cmd + " 2>&1";
+    std::array<char, 4096> buf;
+    std::string out;
+    FILE* p = POPEN(full.c_str(), "r");
+    if (!p) return "";
+    while (fgets(buf.data(), static_cast<int>(buf.size()), p) != nullptr) {
+        out += buf.data();
+    }
+    PCLOSE(p);
+    return out;
 }
 
-OCRExtractor::OCRExtractor(const std::string& python_script_path)
-    : temp_dir_("output/images/temp_ocr"),
-      python_script_path_(python_script_path) {
-    fs::create_directories(temp_dir_);
+// =============================================================
+// Disponibilidad de Tesseract
+// =============================================================
+bool OCRExtractor::isTesseractAvailable() {
+    std::string out = execAndCapture("tesseract --version");
+    return out.find("tesseract") != std::string::npos;
 }
 
-OCRExtractor::~OCRExtractor() {
-    stopServer();
-}
-
-bool OCRExtractor::startServer() {
-    if (server_running_) return true;
-
-    std::cout << "[OCRExtractor] Iniciando servidor OCR persistente..." << std::endl;
-    std::cout << "[OCRExtractor] (El modelo se carga una sola vez, por favor espere)" << std::endl;
-
-    int pipe_to_child[2];
-    int pipe_from_child[2];
-
-    if (pipe(pipe_to_child) < 0 || pipe(pipe_from_child) < 0) {
-        std::cerr << "[OCRExtractor] Error creando pipes" << std::endl;
-        return false;
+bool OCRExtractor::hasLanguage(const std::string& lang) {
+    std::string out = execAndCapture("tesseract --list-langs");
+    // Buscar la linea exacta del idioma
+    std::istringstream iss(out);
+    std::string line;
+    while (std::getline(iss, line)) {
+        // limpiar \r y espacios
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line == lang) return true;
     }
-
-    pid_t pid = fork();
-
-    if (pid < 0) {
-        std::cerr << "[OCRExtractor] Error en fork()" << std::endl;
-        return false;
-    }
-
-    if (pid == 0) {
-        // === Proceso hijo: ejecutar Python ===
-        close(pipe_to_child[1]);
-        close(pipe_from_child[0]);
-
-        dup2(pipe_to_child[0], STDIN_FILENO);
-        close(pipe_to_child[0]);
-
-        dup2(pipe_from_child[1], STDOUT_FILENO);
-        close(pipe_from_child[1]);
-
-        execlp("python3", "python3", python_script_path_.c_str(), "--server", nullptr);
-        execlp("python", "python", python_script_path_.c_str(), "--server", nullptr);
-
-        std::cerr << "[OCRExtractor] Error: no se pudo ejecutar Python" << std::endl;
-        _exit(1);
-    }
-
-    // === Proceso padre ===
-    close(pipe_to_child[0]);
-    close(pipe_from_child[1]);
-
-    server_pid_ = pid;
-    server_stdin_ = fdopen(pipe_to_child[1], "w");
-    server_stdout_ = fdopen(pipe_from_child[0], "r");
-
-    if (!server_stdin_ || !server_stdout_) {
-        std::cerr << "[OCRExtractor] Error abriendo file descriptors" << std::endl;
-        stopServer();
-        return false;
-    }
-
-    // Esperar mensaje "ready" del servidor
-    char buffer[4096];
-    if (fgets(buffer, sizeof(buffer), server_stdout_) != nullptr) {
-        std::string response(buffer);
-        try {
-            auto j = json::parse(response);
-            if (j.contains("status") && j["status"] == "ready") {
-                server_running_ = true;
-                std::cout << "[OCRExtractor] Servidor OCR listo!" << std::endl;
-                return true;
-            }
-        } catch (...) {
-            std::cerr << "[OCRExtractor] Respuesta inesperada: " << response << std::endl;
-        }
-    }
-
-    std::cerr << "[OCRExtractor] El servidor no respondio correctamente" << std::endl;
-    stopServer();
     return false;
 }
 
-void OCRExtractor::stopServer() {
-    if (server_stdin_) {
-        fprintf(server_stdin_, "EXIT\n");
-        fflush(server_stdin_);
-        fclose(server_stdin_);
-        server_stdin_ = nullptr;
-    }
-    if (server_stdout_) {
-        fclose(server_stdout_);
-        server_stdout_ = nullptr;
-    }
-    if (server_pid_ > 0) {
-        int status;
-        waitpid(server_pid_, &status, WNOHANG);
-        kill(server_pid_, SIGTERM);
-        waitpid(server_pid_, &status, 0);
-        server_pid_ = -1;
-    }
-    server_running_ = false;
+// =============================================================
+// Constructor / disponibilidad
+// =============================================================
+OCRExtractor::OCRExtractor()
+    : temp_dir_("output/images/temp_ocr") {
+    fs::create_directories(temp_dir_);
 }
 
-bool OCRExtractor::isServerRunning() const {
-    return server_running_;
+bool OCRExtractor::startServer() {
+    if (!isTesseractAvailable()) {
+        std::cerr << "[OCRExtractor] ERROR: 'tesseract' no esta en el PATH.\n"
+                  << "  Linux:   sudo apt install tesseract-ocr tesseract-ocr-spa\n"
+                  << "  Windows: scoop install tesseract\n"
+                  << "           (o instalador UB-Mannheim, anadir tesseract.exe al PATH)\n";
+        available_ = false;
+        return false;
+    }
+    if (!hasLanguage(lang_)) {
+        std::cerr << "[OCRExtractor] ERROR: idioma '" << lang_ << "' no instalado.\n"
+                  << "  Linux:   sudo apt install tesseract-ocr-" << lang_ << "\n"
+                  << "  Windows: descargar " << lang_
+                  << ".traineddata desde https://github.com/tesseract-ocr/tessdata\n"
+                  << "           y ponerlo en TESSDATA_PREFIX o tessdata/.\n";
+        available_ = false;
+        return false;
+    }
+    available_ = true;
+    std::cout << "[OCRExtractor] Tesseract OCR listo (idioma=" << lang_
+              << ", psm=" << psm_ << ", oem=" << oem_ << ")\n";
+    return true;
 }
 
-std::string OCRExtractor::sendRequest(const std::string& json_request) {
-    if (!server_running_) {
-        if (!startServer()) return "[]";
-    }
-
-    fprintf(server_stdin_, "%s\n", json_request.c_str());
-    fflush(server_stdin_);
-
-    char buffer[65536];
-    if (fgets(buffer, sizeof(buffer), server_stdout_) != nullptr) {
-        return std::string(buffer);
-    }
-
-    std::cerr << "[OCRExtractor] No se recibio respuesta del servidor" << std::endl;
-    return "[]";
-}
-
-std::vector<OCRResult> OCRExtractor::requestOCR(const std::string& image_path) {
-    json request;
-    request["image"] = image_path;
-    std::string response = sendRequest(request.dump());
-    return parseOCRResponse(response);
-}
-
-std::vector<std::vector<OCRResult>> OCRExtractor::requestBatchOCR(
-    const std::vector<std::string>& image_paths) {
-
-    json request;
-    json batch = json::array();
-    for (const auto& path : image_paths) {
-        batch.push_back({{"image", path}});
-    }
-    request["batch"] = batch;
-
-    std::string response = sendRequest(request.dump());
-
-    std::vector<std::vector<OCRResult>> all_results;
-    try {
-        auto parsed = json::parse(response);
-        if (parsed.is_array()) {
-            for (const auto& item : parsed) {
-                std::string item_str = item.dump();
-                all_results.push_back(parseOCRResponse(item_str));
-            }
-        }
-    } catch (const json::parse_error& e) {
-        std::cerr << "[OCRExtractor] Error parseando batch: " << e.what() << std::endl;
-    }
-
-    return all_results;
-}
-
-std::vector<OCRResult> OCRExtractor::parseOCRResponse(const std::string& json_str) {
-    std::vector<OCRResult> results;
-
-    try {
-        auto parsed = json::parse(json_str);
-
-        if (parsed.is_object() && parsed.contains("error")) {
-            std::cerr << "[OCRExtractor] Error OCR: "
-                      << parsed["error"].get<std::string>() << std::endl;
-            return results;
-        }
-
-        if (!parsed.is_array()) return results;
-
-        for (const auto& item : parsed) {
-            if (item.is_object() && item.contains("error")) continue;
-
-            OCRResult r;
-            r.text = item.value("text", "");
-            r.confidence = item.value("confidence", 0.0);
-
-            if (item.contains("bbox")) {
-                const auto& bbox = item["bbox"];
-                int x1 = bbox["top_left"][0].get<int>();
-                int y1 = bbox["top_left"][1].get<int>();
-                int x2 = bbox["bottom_right"][0].get<int>();
-                int y2 = bbox["bottom_right"][1].get<int>();
-                r.bbox = cv::Rect(x1, y1, x2 - x1, y2 - y1);
-            }
-
-            results.push_back(r);
-        }
-    } catch (const json::parse_error& e) {
-        std::cerr << "[OCRExtractor] Error parseando JSON: " << e.what() << std::endl;
-    }
-
-    return results;
-}
-
+// =============================================================
+// Guardado de imagen temporal
+// =============================================================
 std::string OCRExtractor::saveTempImage(const cv::Mat& img, const std::string& prefix) {
-    std::string path = temp_dir_ + "/" + prefix + "_" + std::to_string(temp_counter_++) + ".png";
+    std::string path = temp_dir_ + "/" + prefix + "_" +
+                       std::to_string(temp_counter_++) + ".png";
     cv::imwrite(path, img);
     return path;
 }
 
-OCRResult OCRExtractor::extractFromCell(const cv::Mat& cell_img) {
-    std::string temp_path = saveTempImage(cell_img, "cell");
-    auto results = requestOCR(temp_path);
-    fs::remove(temp_path);
-
-    OCRResult combined;
-    combined.confidence = 0.0;
-
-    for (const auto& r : results) {
-        if (!combined.text.empty()) combined.text += " ";
-        combined.text += r.text;
-        combined.confidence += r.confidence;
-    }
-
-    if (!results.empty()) {
-        combined.confidence /= static_cast<double>(results.size());
-        combined.bbox = results[0].bbox;
-    }
-
-    return combined;
+// =============================================================
+// Llamada a Tesseract (TSV: linea por palabra con bbox y conf)
+// =============================================================
+std::string OCRExtractor::runTesseractTSV(const std::string& image_path) {
+    // tesseract <img> stdout -l <lang> --psm <n> --oem <n> tsv
+    // El argumento "stdout" hace que escriba a stdout en vez de archivo .tsv
+    std::ostringstream cmd;
+    cmd << "tesseract"
+        << " \"" << image_path << "\""
+        << " stdout"
+        << " -l " << lang_
+        << " --psm " << psm_
+        << " --oem " << oem_
+        << " tsv";
+    return execAndCapture(cmd.str());
 }
 
-std::vector<std::vector<OCRResult>> OCRExtractor::extractFromGrid(
-    const cv::Mat& img, const TableGrid& grid) {
+// =============================================================
+// Parseo del TSV. Formato (12 columnas tab-separadas):
+//   level page_num block_num par_num line_num word_num
+//   left top width height conf text
+// level: 1=page, 2=block, 3=para, 4=line, 5=word
+//
+// Emitimos un OCRResult por PALABRA (level=5) en vez de agrupar por
+// linea. El downstream (data_structurer, table_detector) hace su propio
+// clustering por bbox para asignar palabras a columnas — necesita
+// granularidad fina, no lineas completas. Esto replica el comportamiento
+// que tenia EasyOCR (un bbox por frase corta).
+//
+// Detalle: Tesseract a veces parte palabras como "1.000.000.000,00" en
+// varias entradas con espacios. Las uniones de "palabras adyacentes
+// muy juntas" (gap horizontal < altura/2 y misma linea) las fusionamos
+// para reconstruir numeros y nombres compuestos.
+// =============================================================
+std::vector<OCRResult> OCRExtractor::parseTSV(const std::string& tsv) {
+    std::istringstream iss(tsv);
+    std::string line;
+    bool header_skipped = false;
 
-    std::cout << "[OCRExtractor] Extrayendo texto de grid ("
-              << grid.cells.size() << " filas)..." << std::endl;
+    struct Word {
+        int block, par, ln;
+        int left, top, width, height;
+        double conf;
+        std::string text;
+    };
+    std::vector<Word> words;
 
-    std::vector<std::string> cell_paths;
-    std::vector<std::pair<int, int>> cell_coords;
+    while (std::getline(iss, line)) {
+        if (!header_skipped) { header_skipped = true; continue; }
+        if (line.empty()) continue;
 
-    for (size_t r = 0; r < grid.cells.size(); ++r) {
-        for (size_t c = 0; c < grid.cells[r].size(); ++c) {
-            cv::Rect cell_rect = grid.cells[r][c] & cv::Rect(0, 0, img.cols, img.rows);
-            if (cell_rect.width <= 0 || cell_rect.height <= 0) {
-                cell_paths.push_back("");
-                cell_coords.push_back({static_cast<int>(r), static_cast<int>(c)});
-                continue;
-            }
-            cv::Mat cell_img = img(cell_rect);
-            std::string path = saveTempImage(cell_img, "grid");
-            cell_paths.push_back(path);
-            cell_coords.push_back({static_cast<int>(r), static_cast<int>(c)});
-        }
-    }
+        std::vector<std::string> cols;
+        std::string tok;
+        std::istringstream ls(line);
+        while (std::getline(ls, tok, '\t')) cols.push_back(tok);
+        if (cols.size() < 12) continue;
 
-    std::vector<std::string> valid_paths;
-    std::vector<int> valid_indices;
-    for (size_t i = 0; i < cell_paths.size(); ++i) {
-        if (!cell_paths[i].empty()) {
-            valid_paths.push_back(cell_paths[i]);
-            valid_indices.push_back(static_cast<int>(i));
-        }
-    }
+        try {
+            int level = std::stoi(cols[0]);
+            if (level != 5) continue;
+            std::string t = cols[11];
+            while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
+            while (!t.empty() && std::isspace(static_cast<unsigned char>(t.front()))) t.erase(t.begin());
+            if (t.empty()) continue;
 
-    std::cout << "[OCRExtractor] Procesando " << valid_paths.size()
-              << " celdas en batch..." << std::endl;
-
-    const size_t BATCH_SIZE = 20;
-    std::vector<std::vector<OCRResult>> batch_results_all;
-
-    for (size_t start = 0; start < valid_paths.size(); start += BATCH_SIZE) {
-        size_t end = std::min(start + BATCH_SIZE, valid_paths.size());
-        std::vector<std::string> batch_paths(valid_paths.begin() + start,
-                                              valid_paths.begin() + end);
-        auto batch_res = requestBatchOCR(batch_paths);
-        batch_results_all.insert(batch_results_all.end(),
-                                  batch_res.begin(), batch_res.end());
-
-        std::cout << "[OCRExtractor] Batch " << (start / BATCH_SIZE + 1)
-                  << " completado (" << end << "/" << valid_paths.size() << ")" << std::endl;
-    }
-
-    int num_rows = static_cast<int>(grid.cells.size());
-    std::vector<std::vector<OCRResult>> table_results(num_rows);
-    for (int r = 0; r < num_rows; ++r) {
-        table_results[r].resize(grid.cells[r].size());
-    }
-
-    int batch_idx = 0;
-    for (size_t i = 0; i < cell_coords.size(); ++i) {
-        int r = cell_coords[i].first;
-        int c = cell_coords[i].second;
-
-        if (cell_paths[i].empty()) {
-            table_results[r][c].text = "";
-            table_results[r][c].confidence = 0.0;
+            Word w;
+            w.block  = std::stoi(cols[2]);
+            w.par    = std::stoi(cols[3]);
+            w.ln     = std::stoi(cols[4]);
+            w.left   = std::stoi(cols[6]);
+            w.top    = std::stoi(cols[7]);
+            w.width  = std::stoi(cols[8]);
+            w.height = std::stoi(cols[9]);
+            w.conf   = std::stod(cols[10]);
+            w.text   = t;
+            if (w.conf < 0) continue;
+            words.push_back(w);
+        } catch (...) {
             continue;
         }
+    }
 
-        if (batch_idx < static_cast<int>(batch_results_all.size())) {
-            OCRResult combined;
-            combined.confidence = 0.0;
-            for (const auto& res : batch_results_all[batch_idx]) {
-                if (!combined.text.empty()) combined.text += " ";
-                combined.text += res.text;
-                combined.confidence += res.confidence;
-            }
-            if (!batch_results_all[batch_idx].empty()) {
-                combined.confidence /= static_cast<double>(batch_results_all[batch_idx].size());
-            }
-            combined.bbox = grid.cells[r][c];
-            table_results[r][c] = combined;
+    // Emitir un OCRResult por palabra. Fusionar adyacentes en la misma
+    // linea cuando esten muy pegadas (gap < altura/2). Eso reconstruye
+    // numeros como "1.000.000.000,00" que tesseract puede partir.
+    std::vector<OCRResult> results;
+    size_t i = 0;
+    while (i < words.size()) {
+        size_t j = i + 1;
+        OCRResult r;
+        r.text       = words[i].text;
+        r.confidence = words[i].conf / 100.0;
+        int x1 = words[i].left;
+        int y1 = words[i].top;
+        int x2 = words[i].left + words[i].width;
+        int y2 = words[i].top  + words[i].height;
+        int h  = words[i].height;
+
+        while (j < words.size()
+               && words[j].block == words[i].block
+               && words[j].par   == words[i].par
+               && words[j].ln    == words[i].ln) {
+            int gap = words[j].left - x2;
+            if (gap > h / 2) break;          // espacio = nueva celda
+            r.text += " " + words[j].text;
+            r.confidence = (r.confidence + words[j].conf / 100.0) / 2.0;
+            x2 = std::max(x2, words[j].left + words[j].width);
+            y1 = std::min(y1, words[j].top);
+            y2 = std::max(y2, words[j].top + words[j].height);
+            ++j;
         }
-        batch_idx++;
+        r.bbox = cv::Rect(x1, y1, x2 - x1, y2 - y1);
+        results.push_back(r);
+        i = j;
     }
+    return results;
+}
 
-    for (const auto& path : cell_paths) {
-        if (!path.empty()) fs::remove(path);
-    }
-
-    std::cout << "[OCRExtractor] Extraccion de grid completada." << std::endl;
-    return table_results;
+// =============================================================
+// API publica
+// =============================================================
+std::vector<OCRResult> OCRExtractor::extractAll(const cv::Mat& image) {
+    if (!available_ && !startServer()) return {};
+    std::cout << "[OCRExtractor] Tesseract sobre imagen "
+              << image.cols << "x" << image.rows << "..." << std::endl;
+    std::string path = saveTempImage(image, "full");
+    std::string tsv  = runTesseractTSV(path);
+    fs::remove(path);
+    auto results = parseTSV(tsv);
+    std::cout << "[OCRExtractor] " << results.size()
+              << " lineas de texto extraidas." << std::endl;
+    return results;
 }
 
 std::vector<OCRResult> OCRExtractor::extractFromRegion(const cv::Mat& region) {
-    std::string temp_path = saveTempImage(region, "region");
-    auto results = requestOCR(temp_path);
-    fs::remove(temp_path);
-    return results;
+    if (!available_ && !startServer()) return {};
+    std::string path = saveTempImage(region, "region");
+    std::string tsv  = runTesseractTSV(path);
+    fs::remove(path);
+    return parseTSV(tsv);
 }
 
-std::vector<OCRResult> OCRExtractor::extractAll(const cv::Mat& image) {
-    std::cout << "[OCRExtractor] Extrayendo texto de imagen completa..." << std::endl;
-    std::string temp_path = saveTempImage(image, "full");
-    auto results = requestOCR(temp_path);
-    fs::remove(temp_path);
-    std::cout << "[OCRExtractor] " << results.size() << " bloques de texto extraidos" << std::endl;
-    return results;
+OCRResult OCRExtractor::extractFromCell(const cv::Mat& cell_img) {
+    auto rows = extractFromRegion(cell_img);
+    OCRResult combined;
+    combined.confidence = 0.0;
+    if (rows.empty()) return combined;
+    double conf_sum = 0;
+    for (const auto& r : rows) {
+        if (!combined.text.empty()) combined.text += " ";
+        combined.text += r.text;
+        conf_sum += r.confidence;
+    }
+    combined.confidence = conf_sum / rows.size();
+    combined.bbox = rows.front().bbox;
+    return combined;
+}
+
+// Optimizacion: una sola pasada de OCR sobre la imagen completa,
+// luego asignacion de cada linea de texto a la celda con la que tenga
+// mayor interseccion de bbox. Mucho mas rapido que llamar a Tesseract
+// por celda (evita N spawns de proceso y N cargas del modelo).
+std::vector<std::vector<OCRResult>> OCRExtractor::extractFromGrid(
+    const cv::Mat& img, const TableGrid& grid) {
+
+    std::cout << "[OCRExtractor] OCR de tabla por interseccion de bbox ("
+              << grid.cells.size() << " filas)..." << std::endl;
+
+    auto all = extractAll(img);
+
+    int num_rows = static_cast<int>(grid.cells.size());
+    std::vector<std::vector<OCRResult>> table(num_rows);
+    for (int r = 0; r < num_rows; ++r)
+        table[r].resize(grid.cells[r].size());
+
+    auto area = [](const cv::Rect& a) { return a.width * a.height; };
+
+    for (const auto& line : all) {
+        int best_r = -1, best_c = -1, best_area = 0;
+        for (int r = 0; r < num_rows; ++r) {
+            for (size_t c = 0; c < grid.cells[r].size(); ++c) {
+                cv::Rect inter = line.bbox & grid.cells[r][c];
+                int a = area(inter);
+                if (a > best_area) {
+                    best_area = a;
+                    best_r = r;
+                    best_c = static_cast<int>(c);
+                }
+            }
+        }
+        if (best_r >= 0 && best_area > 0) {
+            auto& dst = table[best_r][best_c];
+            if (!dst.text.empty()) dst.text += " ";
+            dst.text += line.text;
+            dst.confidence = (dst.confidence + line.confidence) / 2.0;
+            dst.bbox = grid.cells[best_r][best_c];
+        }
+    }
+
+    std::cout << "[OCRExtractor] Asignacion por bbox completada." << std::endl;
+    return table;
 }

@@ -1,0 +1,28 @@
+{
+  "_comentario": "Parametros financieros de referencia. Editables sin recompilar.",
+
+  "tasa_libre_riesgo_anual": 0.0925,
+  "_doc_tasa_libre_riesgo": "IBR 1 ano Colombia (~9.25% en 2026). Usada para Sharpe Ratio. Referencia: tasa que ofrecen los TES o el IBR de Banrep.",
+
+  "inflacion_anual": 0.0480,
+  "_doc_inflacion": "IPC anual Colombia (~4.8% objetivo Banrep). Usada para retorno real (Fisher).",
+
+  "benchmark_rendimiento_anual": 0.1100,
+  "_doc_benchmark": "Rendimiento de referencia para comparar el portafolio (ej. tasa de un TES de plazo similar).",
+
+  "umbrales_concentracion": {
+    "hhi_bajo": 1500,
+    "hhi_alto": 2500,
+    "_doc": "HHI < 1500 = bien diversificado; 1500-2500 = moderado; > 2500 = alta concentracion (Departamento Justicia EEUU)."
+  },
+
+  "umbrales_duracion_dias": {
+    "corto":  90,
+    "medio": 365,
+    "largo": 1095,
+    "_doc": "Buckets de vencimiento: corto < 90d, medio 90-365d, largo 1-3y, muy_largo > 3y."
+  },
+
+  "umbral_outliers_sigma": 2.0,
+  "_doc_outliers": "Una tasa es outlier si esta a mas de N desviaciones estandar de la media."
+}

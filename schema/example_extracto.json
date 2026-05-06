@@ -1,0 +1,219 @@
+{
+  "schema_version": "1.0",
+
+  "extraction_metadata": {
+    "extracted_at": "2026-05-03T22:30:00Z",
+    "source_file": "ExtractoUnificadoAccionesyValores.pdf",
+    "source_type": "pdf",
+    "page_count": 4,
+    "extraction_method": "layoutlmv3+tatr+rules",
+    "confidence_global": 0.92,
+    "needs_review": false,
+    "warnings": []
+  },
+
+  "issuer": {
+    "name": "Acciones & Valores S.A.",
+    "type": "comisionista_bolsa",
+    "nit": "860500000-0",
+    "country": "CO"
+  },
+
+  "account_holder": {
+    "full_name": "Cliente Demo",
+    "id_type": "CC",
+    "id_number": "1234567890",
+    "address": "Calle 1 #2-3",
+    "city": "Bogota",
+    "phone": "3001234567",
+    "email": null,
+    "advisor": {
+      "name": "Asesor Demo",
+      "email": "asesor@accionesyvalores.com",
+      "phone": null
+    }
+  },
+
+  "period": {
+    "start_date": "2026-04-01",
+    "end_date": "2026-04-30",
+    "issue_date": "2026-05-01"
+  },
+
+  "currency": "COP",
+
+  "summary": {
+    "total_assets": 6386676308.68,
+    "total_liabilities": 0,
+    "net_worth": 6386676308.68,
+    "previous_balance": 6379970653.18,
+    "period_change": 6705655.50,
+    "period_change_pct": 0.00105
+  },
+
+  "sections": [
+    {
+      "section_type": "cash_balance",
+      "title": "Saldos en Efectivo",
+      "items": [
+        {
+          "account_id": null,
+          "account_name": "Cuenta operativa",
+          "available": 0,
+          "blocked": 0,
+          "in_transit": 0,
+          "total": 0,
+          "currency": "COP"
+        }
+      ],
+      "subtotal": 0
+    },
+
+    {
+      "section_type": "fixed_income",
+      "title": "Renta Fija",
+      "items": [
+        {
+          "instrument_id": "CDTBANCO01",
+          "instrument_type": "CDT",
+          "issuer": "Banco A",
+          "issue_date": "2025-03-15",
+          "maturity_date": "2026-03-15",
+          "purchase_date": "2025-03-20",
+          "face_rate": 9.7618,
+          "negotiated_rate": 10.09,
+          "valuation_rate": 11.6688,
+          "rate_basis": "EA",
+          "payment_frequency": "TV",
+          "nominal_value": 1000000000,
+          "market_value": 1095267330,
+          "currency": "COP"
+        },
+        {
+          "instrument_id": "CDTBANCO02",
+          "instrument_type": "CDT",
+          "issuer": "Banco B",
+          "issue_date": "2025-04-10",
+          "maturity_date": "2026-04-10",
+          "purchase_date": "2025-04-15",
+          "face_rate": 9.13,
+          "negotiated_rate": 9.85,
+          "valuation_rate": 10.64,
+          "rate_basis": "EA",
+          "payment_frequency": "TV",
+          "nominal_value": 1000000000,
+          "market_value": 1095200000,
+          "currency": "COP"
+        },
+        {
+          "instrument_id": "CDTBANCO03",
+          "instrument_type": "CDT",
+          "issuer": "Banco C",
+          "issue_date": "2025-05-20",
+          "maturity_date": "2026-05-20",
+          "purchase_date": "2025-05-25",
+          "face_rate": 10.12,
+          "negotiated_rate": 11.50,
+          "valuation_rate": 12.4100,
+          "rate_basis": "EA",
+          "payment_frequency": "TV",
+          "nominal_value": 1000000000,
+          "market_value": 1096600000,
+          "currency": "COP"
+        },
+        {
+          "instrument_id": "CDTBANCO04",
+          "instrument_type": "CDT",
+          "issuer": "Banco D",
+          "issue_date": "2025-06-01",
+          "maturity_date": "2026-06-01",
+          "purchase_date": "2025-06-05",
+          "face_rate": 9.44,
+          "negotiated_rate": 10.40,
+          "valuation_rate": 11.36,
+          "rate_basis": "EA",
+          "payment_frequency": "TV",
+          "nominal_value": 1000000000,
+          "market_value": 1095000000,
+          "currency": "COP"
+        }
+      ],
+      "subtotal": 4382067330
+    },
+
+    {
+      "section_type": "investment_fund",
+      "title": "Fondo de Inversion Colectiva",
+      "fund": {
+        "name": "FIC Renta Liquida",
+        "code": "FIC001",
+        "administrator": "Acciones & Valores S.A.",
+        "objective": "Liquidez con rentabilidad estable"
+      },
+      "movements": {
+        "previous_balance": 1997903323.18,
+        "additions": 0,
+        "withdrawals": 0,
+        "returns": 6705655.50,
+        "new_balance": 2004608978.68,
+        "units": 12345.6789,
+        "unit_value_end": 162.42,
+        "currency": "COP"
+      },
+      "historical_returns": {
+        "monthly": 0.0335,
+        "semi_annual": 0.0612,
+        "ytd": 0.0451,
+        "last_year": 0.1166,
+        "last_2_years_annualized": 0.1080,
+        "last_3_years_annualized": 0.0950
+      }
+    },
+
+    {
+      "section_type": "transactions",
+      "title": "Movimientos Cuenta Operativa",
+      "account_id": "001-DEMO",
+      "account_type": "ahorros",
+      "currency": "COP",
+      "items": [
+        {
+          "date": "2026-04-05",
+          "description": "Abono rendimientos FIC",
+          "reference": "FIC-APR-001",
+          "category": "rendimientos",
+          "debit": null,
+          "credit": 1500000,
+          "balance_after": 1500000
+        },
+        {
+          "date": "2026-04-15",
+          "description": "Compra CDT Banco D",
+          "reference": "CDT-04-2026",
+          "category": "inversion",
+          "debit": 1000000,
+          "credit": null,
+          "balance_after": 500000
+        },
+        {
+          "date": "2026-04-30",
+          "description": "Pago dividendos",
+          "reference": "DIV-001",
+          "category": "rendimientos",
+          "debit": null,
+          "credit": 250000,
+          "balance_after": 750000
+        }
+      ],
+      "totals": {
+        "debits": 1000000,
+        "credits": 1750000,
+        "net": 750000,
+        "ending_balance": 750000
+      }
+    }
+  ],
+
+  "alerts_raw": [],
+  "raw_extracted_text": null
+}

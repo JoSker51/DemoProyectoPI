@@ -1,10 +1,17 @@
 # Build
 build/
+build_test/
 
 # Output
 output/
-pdfs/
 resultados/
+
+# PDFs: los ejemplos de referencia SI se versionan; PDFs aleatorios
+# del usuario y data de prueba generada NO.
+pdfs/*
+!pdfs/examples/
+pdfs/test_variants/
+extracto_test.pdf
 
 # IDE
 .vscode/

@@ -1395,6 +1395,45 @@ json ExtractoCompleto::to_json() const {
     for (const auto& f : fondos) fondos_arr.push_back(f.to_json());
     j["fondos"] = fondos_arr;
 
+    json tx_arr = json::array();
+    for (const auto& t : transacciones) tx_arr.push_back(t.to_json());
+    j["transacciones"] = tx_arr;
+
+    j["currency"] = source_currency;
+
+    return j;
+}
+
+json Transaction::to_json() const {
+    json j;
+    j["date"] = date;
+    if (!value_date.empty()) j["value_date"] = value_date;
+    j["description"] = description;
+    if (!reference.empty()) j["reference"] = reference;
+    if (!category.empty())  j["category"]  = category;
+    j["debit"]  = debit;
+    j["credit"] = credit;
+    if (has_balance_after) j["balance_after"] = balance_after;
+    return j;
+}
+
+json CuentaTransacciones::to_json() const {
+    json j;
+    j["account_id"]   = account_id;
+    if (!account_type.empty()) j["account_type"] = account_type;
+    if (!title.empty())        j["title"]        = title;
+    j["currency"] = currency;
+    json items_arr = json::array();
+    for (const auto& it : items) items_arr.push_back(it.to_json());
+    j["items"] = items_arr;
+    if (has_totals) {
+        j["totals"] = {
+            {"debits",         total_debits},
+            {"credits",        total_credits},
+            {"net",            net},
+            {"ending_balance", ending_balance}
+        };
+    }
     return j;
 }
 

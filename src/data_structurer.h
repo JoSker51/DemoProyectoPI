@@ -68,11 +68,40 @@ struct FondoInversion {
     nlohmann::json to_json() const;
 };
 
+struct Transaction {
+    std::string date;            // ISO 8601 (YYYY-MM-DD)
+    std::string value_date;
+    std::string description;
+    std::string reference;
+    std::string category;
+    double debit = 0.0;          // monto positivo; 0 si no aplica
+    double credit = 0.0;
+    double balance_after = 0.0;
+    bool has_balance_after = false;
+    nlohmann::json to_json() const;
+};
+
+struct CuentaTransacciones {
+    std::string account_id;
+    std::string account_type;    // "ahorros" | "corriente" | "credito" | "inversion" | "otro"
+    std::string title;
+    std::string currency = "COP";
+    std::vector<Transaction> items;
+    double total_debits = 0.0;
+    double total_credits = 0.0;
+    double net = 0.0;
+    double ending_balance = 0.0;
+    bool has_totals = false;
+    nlohmann::json to_json() const;
+};
+
 struct ExtractoCompleto {
     ResumenPortafolio resumen;
     std::vector<SaldoEfectivo> saldos_efectivo;
     std::vector<InstrumentoRentaFija> renta_fija;
     std::vector<FondoInversion> fondos;
+    std::vector<CuentaTransacciones> transacciones;   // nuevo: secciones tipo transactions
+    std::string source_currency = "COP";              // moneda global del extracto
     nlohmann::json to_json() const;
     bool saveToFile(const std::string& path) const;
 };

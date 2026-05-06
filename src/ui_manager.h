@@ -40,6 +40,9 @@ private:
     wxStaticBitmap* panel_grafica_;
     wxScrolledWindow* scroll_grafica_;
     wxGrid* grid_analisis_;
+    wxStaticBitmap* panel_preview_;
+    wxScrolledWindow* scroll_preview_;
+    wxStaticText* lbl_preview_info_;
 
     std::string current_pdf_path_;
     std::string current_pdf_password_;
@@ -55,6 +58,11 @@ private:
     wxPanel* createFondosTab(wxNotebook* parent);
     wxPanel* createGraficasTab(wxNotebook* parent);
     wxPanel* createAnalisisTab(wxNotebook* parent);
+    wxPanel* createPreviewTab(wxNotebook* parent);
+    void showPreview(const std::string& image_path);
+
+    static bool isImageFile(const std::string& path);
+    static bool isPdfFile(const std::string& path);
 
     void OnSelectPDF(wxCommandEvent& event);
     void OnProcess(wxCommandEvent& event);

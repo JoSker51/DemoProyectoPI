@@ -2,6 +2,8 @@
 #include <string>
 #include <filesystem>
 #include <iomanip>
+#include <fstream>
+#include <cstdlib>
 
 #include "pdf_processor.h"
 #include "image_preprocessor.h"
@@ -13,6 +15,8 @@
 #include "graph_generator.h"
 #include "csv_exporter.h"
 #include "ui_manager.h"
+#include "extracto_loader.h"
+#include "standard_parser.h"
 
 #include <wx/wx.h>
 
@@ -21,55 +25,71 @@ namespace fs = std::filesystem;
 // ============================================================
 // Modo consola: pipeline completo sin GUI
 // ============================================================
+// Helpers de tipo de archivo (mismos criterios que la UI)
+static bool isImagePath(const std::string& p) {
+    auto pos = p.find_last_of('.');
+    if (pos == std::string::npos) return false;
+    std::string ext = p.substr(pos + 1);
+    for (auto& c : ext) c = static_cast<char>(std::tolower(c));
+    return ext == "png" || ext == "jpg" || ext == "jpeg" ||
+           ext == "bmp" || ext == "tif" || ext == "tiff";
+}
+static bool isPdfPath(const std::string& p) {
+    auto pos = p.find_last_of('.');
+    if (pos == std::string::npos) return false;
+    std::string ext = p.substr(pos + 1);
+    for (auto& c : ext) c = static_cast<char>(std::tolower(c));
+    return ext == "pdf";
+}
+
 int runConsole(const std::string& pdf_path, const std::string& password) {
     std::cout << "========================================" << std::endl;
     std::cout << " Sistema de Analisis de Extractos" << std::endl;
     std::cout << " Modo Consola" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
-    // 1. Verificar dependencias
-    if (!PDFProcessor::isPopplerAvailable()) {
-        std::cerr << "ERROR: pdftoppm no esta instalado." << std::endl;
-        std::cerr << "Instalar con: sudo apt install poppler-utils" << std::endl;
-        return 1;
-    }
-
     if (!fs::exists(pdf_path)) {
         std::cerr << "ERROR: Archivo no encontrado: " << pdf_path << std::endl;
         return 1;
     }
 
-    std::cout << "[1/8] Archivo PDF: " << pdf_path << std::endl;
+    std::cout << "[1/8] Archivo de entrada: " << pdf_path << std::endl;
+    std::vector<std::string> images;
 
-    // 2. Verificar contrasena
-    std::string pw = password;
-    if (pw.empty() && PDFProcessor::needsPassword(pdf_path)) {
-        std::cout << "El PDF esta protegido. Ingrese la contrasena: ";
-        std::getline(std::cin, pw);
-    }
-
-    // 3. Convertir PDF a imagenes
-    std::cout << "\n[2/8] Convirtiendo PDF a imagenes..." << std::endl;
-    PDFProcessor pdf;
-    if (!pw.empty()) {
-        pdf.setPassword(pw);
-    }
-
-    fs::create_directories("output/images");
-    auto images = pdf.convertToImages(pdf_path, "output/images", 300);
-
-    if (images.empty()) {
-        std::cerr << "ERROR: No se pudieron generar imagenes del PDF." << std::endl;
+    if (isImagePath(pdf_path)) {
+        std::cout << "  Tipo: imagen. Saltando conversion PDF.\n";
+        images.push_back(pdf_path);
+    } else if (isPdfPath(pdf_path)) {
+        if (!PDFProcessor::isPopplerAvailable()) {
+            std::cerr << "ERROR: pdftoppm no esta instalado." << std::endl;
+            std::cerr << "Instalar con: sudo apt install poppler-utils" << std::endl;
+            return 1;
+        }
+        std::string pw = password;
+        if (pw.empty() && PDFProcessor::needsPassword(pdf_path)) {
+            std::cout << "El PDF esta protegido. Ingrese la contrasena: ";
+            std::getline(std::cin, pw);
+        }
+        std::cout << "\n[2/8] Convirtiendo PDF a imagenes..." << std::endl;
+        PDFProcessor pdf;
+        if (!pw.empty()) pdf.setPassword(pw);
+        fs::create_directories("output/images");
+        images = pdf.convertToImages(pdf_path, "output/images", 300);
+        if (images.empty()) {
+            std::cerr << "ERROR: No se pudieron generar imagenes del PDF." << std::endl;
+            return 1;
+        }
+        std::cout << "  " << images.size() << " paginas convertidas." << std::endl;
+    } else {
+        std::cerr << "ERROR: Tipo de archivo no soportado. Use PDF o imagen." << std::endl;
         return 1;
     }
-    std::cout << "  " << images.size() << " paginas convertidas." << std::endl;
 
-    // 4. Iniciar servidor OCR
-    std::cout << "\n[3/8] Iniciando servidor OCR..." << std::endl;
+    // 4. Inicializar Tesseract OCR
+    std::cout << "\n[3/8] Inicializando Tesseract OCR..." << std::endl;
     OCRExtractor ocr;
     if (!ocr.startServer()) {
-        std::cerr << "ERROR: No se pudo iniciar el servidor OCR." << std::endl;
-        std::cerr << "Verificar que Python3 y EasyOCR estan instalados." << std::endl;
+        std::cerr << "ERROR: Tesseract no disponible (ver mensaje arriba)." << std::endl;
         return 1;
     }
 
@@ -85,18 +105,54 @@ int runConsole(const std::string& pdf_path, const std::string& password) {
         int page_num = static_cast<int>(i + 1);
         std::cout << "\n--- Pagina " << page_num << " ---" << std::endl;
 
-        cv::Mat img = cv::imread(images[i]);
-        if (img.empty()) {
+        cv::Mat img_raw = cv::imread(images[i]);
+        if (img_raw.empty()) {
             std::cerr << "  ERROR: No se pudo leer imagen: " << images[i] << std::endl;
             continue;
         }
 
-        std::cout << "  Dimensiones: " << img.cols << "x" << img.rows << std::endl;
+        std::cout << "  Dimensiones originales: "
+                  << img_raw.cols << "x" << img_raw.rows << std::endl;
 
-        // Preprocesar
-        cv::Mat preprocessed = preproc.fullPreprocess(img);
+        // Preprocesar (auto-detecta foto celular vs escaneo limpio).
+        // Para activar guardado de etapas intermedias, exportar
+        // PROYECTOPI_DEBUG_PREPROC=1 antes de correr.
+        if (std::getenv("PROYECTOPI_DEBUG_PREPROC")) {
+            preproc.setDebugDir("output/preprocessing_debug/page_" +
+                                std::to_string(page_num));
+        }
+        PreprocessReport rep;
+        cv::Mat img = preproc.enhanceForOCR(img_raw, &rep);
+        std::cout << "  Pipeline: doc_detected=" << rep.document_detected
+                  << " rot=" << rep.rotation_corrected_deg << "deg"
+                  << " sharpness=" << rep.sharpness_score
+                  << " final=" << img.cols << "x" << img.rows << "\n";
+        if (!rep.warning.empty())
+            std::cout << "  AVISO: " << rep.warning << "\n";
 
-        // Clasificar
+        // Intento primero el parser del template estandar v1.
+        // Si el OCR muestra "EXTRACTO DE INVERSIONES", todo el extracto
+        // esta en esta pagina y lo parseamos en bloque, saltando el switch
+        // por tipo (que es para el layout legacy de A&V).
+        {
+            auto ocr_data = ocr.extractAll(img);
+            // Dump opcional del OCR si PROYECTOPI_DEBUG_OCR=1
+            if (std::getenv("PROYECTOPI_DEBUG_OCR")) {
+                std::cout << "  [DEBUG] OCR resultados: " << ocr_data.size() << " bloques\n";
+                for (size_t k = 0; k < std::min<size_t>(150, ocr_data.size()); ++k) {
+                    std::cout << "    [" << k << "] (" << ocr_data[k].bbox.x << ","
+                              << ocr_data[k].bbox.y << ") '"
+                              << ocr_data[k].text << "'\n";
+                }
+            }
+            if (StandardParser::detectStandardTemplate(ocr_data)) {
+                StandardParser::parseAll(ocr_data, extracto);
+                std::cout << "  [Pag " << page_num << "] template estandar v1 procesado.\n";
+                continue;
+            }
+        }
+
+        // Pipeline legacy (Acciones & Valores S.A.)
         PageType type = classifier.classify(img);
         std::cout << "  Tipo: " << PageClassifier::pageTypeToString(type) << std::endl;
 
@@ -267,15 +323,115 @@ int runConsole(const std::string& pdf_path, const std::string& password) {
 }
 
 // ============================================================
+// Modo --from-json: salta la extraccion PDF/OCR y ejecuta solo
+// validacion + analisis + graficas + CSV sobre un JSON ya extraido.
+// Util para probar el pipeline de analisis sin depender de la IA
+// ni del PDF. Acepta cualquier JSON conforme a extracto_v1.schema.json.
+// ============================================================
+int runFromJson(const std::string& json_path) {
+    std::cout << "========================================\n"
+              << " Modo --from-json (sin extraccion PDF)\n"
+              << "========================================\n";
+
+    if (!fs::exists(json_path)) {
+        std::cerr << "ERROR: Archivo no encontrado: " << json_path << std::endl;
+        return 1;
+    }
+
+    ExtractoLoader loader;
+    ExtractoCompleto extracto;
+    if (!loader.loadFromFile(json_path, extracto)) {
+        std::cerr << "ERROR: No se pudo cargar el JSON.\n";
+        for (const auto& e : loader.getErrors()) std::cerr << "  - " << e << "\n";
+        return 1;
+    }
+    for (const auto& w : loader.getWarnings()) std::cout << "  AVISO: " << w << "\n";
+
+    std::cout << "[1/4] Cargado: " << extracto.resumen.nombre_cliente
+              << " | RF=" << extracto.renta_fija.size()
+              << " fondos=" << extracto.fondos.size()
+              << " saldos=" << extracto.saldos_efectivo.size()
+              << " transacciones=" << extracto.transacciones.size()
+              << "\n";
+
+    std::cout << "[2/4] Analisis estadistico..." << std::endl;
+    StatisticalAnalyzer analyzer;
+    std::vector<ExtractoCompleto> serie;
+    auto historical = StatisticalAnalyzer::loadHistoricalData("data/historico_inicial.csv");
+    for (const auto& record : historical) {
+        ExtractoCompleto h;
+        auto it = record.find("total_portafolio");
+        if (it != record.end()) { try { h.resumen.total_portafolio = std::stod(it->second); } catch (...) {} }
+        it = record.find("renta_fija");
+        if (it != record.end()) { try { h.resumen.activos["Renta Fija"] = std::stod(it->second); } catch (...) {} }
+        it = record.find("fic");
+        if (it != record.end()) { try { h.resumen.activos["FIC"] = std::stod(it->second); } catch (...) {} }
+        it = record.find("efectivo");
+        if (it != record.end()) { try { h.resumen.activos["Saldos en Efectivo"] = std::stod(it->second); } catch (...) {} }
+        serie.push_back(h);
+    }
+    serie.push_back(extracto);
+    AnalysisResult analysis = analyzer.analyzeTimeSeries(serie);
+
+    std::cout << "  Composicion:\n";
+    for (const auto& [k, v] : analysis.composicion_porcentaje) {
+        std::cout << "    " << k << ": " << std::fixed << std::setprecision(1) << v << "%\n";
+    }
+    const auto& a = analysis.avanzadas;
+    std::cout << "\n  KPIs ejecutivos:\n"
+              << "    Yield ponderado:        " << std::setprecision(2) << a.yield_ponderado_pct << "%\n"
+              << "    Duracion modificada:    " << std::setprecision(3) << a.duracion_modificada << " anos\n"
+              << "    HHI:                    " << std::setprecision(0) << a.hhi << " (" << a.hhi_categoria << ")\n"
+              << "    Top-3 exposure:         " << std::setprecision(1) << a.top3_exposure_pct << "%\n"
+              << "    Sharpe FIC:             " << std::setprecision(3) << a.sharpe_fic << "\n"
+              << "    Max Drawdown:           " << std::setprecision(2) << a.max_drawdown_pct << "%\n"
+              << "    Retorno real (Fisher):  " << std::setprecision(2) << a.retorno_real_pct << "%\n"
+              << "    Skewness / Kurtosis:    " << std::setprecision(3) << a.skewness_tasas
+              << " / " << a.kurtosis_tasas << "\n";
+
+    std::cout << "[3/4] Generando graficas..." << std::endl;
+    fs::create_directories("output/graphs");
+    GraphGenerator grapher;
+    auto graph_paths = grapher.generateAll(extracto, analysis, "output/graphs");
+    std::cout << "  " << graph_paths.size() << " graficas generadas.\n";
+
+    std::cout << "[4/4] Exportando CSV/JSON..." << std::endl;
+    fs::create_directories("output/csv");
+    fs::create_directories("output/json");
+    CSVExporter exporter;
+    auto csv_paths = exporter.exportAll(extracto, analysis, "output/csv");
+    std::cout << "  " << csv_paths.size() << " CSV exportados.\n";
+    extracto.saveToFile("output/json/extracto.json");
+    // Guardar tambien el analisis completo para inspeccion
+    {
+        std::ofstream of("output/json/analysis.json");
+        of << analysis.to_json().dump(2);
+    }
+
+    std::cout << "\n=== OK ===\n"
+              << " Cliente: " << extracto.resumen.nombre_cliente << "\n"
+              << " Total Portafolio: $" << std::fixed << std::setprecision(2)
+              << extracto.resumen.total_portafolio << "\n"
+              << " Salidas en: output/graphs, output/csv, output/json\n";
+    return 0;
+}
+
+// ============================================================
 // main: Dual mode (GUI o consola)
 // ============================================================
 int main(int argc, char* argv[]) {
-    // Modo consola si se pasa un archivo PDF como argumento
+    // Modo --from-json: cargar JSON ya extraido y solo analizar/graficar
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--from-json") {
+            return runFromJson(argv[i + 1]);
+        }
+    }
+
+    // Modo consola si se pasa un archivo PDF o imagen como primer argumento
     if (argc >= 2) {
         std::string arg1 = argv[1];
 
-        // Verificar si es un archivo PDF (no un flag de wx)
-        if (arg1.size() > 4 && arg1.substr(arg1.size() - 4) == ".pdf") {
+        if (isPdfPath(arg1) || isImagePath(arg1)) {
             std::string password;
             // Buscar flag --pw
             for (int i = 2; i < argc - 1; ++i) {

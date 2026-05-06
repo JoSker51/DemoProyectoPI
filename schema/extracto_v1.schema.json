@@ -1,0 +1,323 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://demoproyectopi/schemas/extracto_v1.json",
+  "title": "Extracto Financiero",
+  "description": "Schema unificado para extractos bancarios y de inversion. Disenado para soportar multiples emisores y tipos de extracto.",
+  "type": "object",
+  "required": ["schema_version", "extraction_metadata", "issuer", "account_holder", "period", "currency", "summary", "sections"],
+  "additionalProperties": false,
+
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Version del schema. Permite migracion futura."
+    },
+
+    "extraction_metadata": {
+      "type": "object",
+      "required": ["extracted_at", "source_file", "extraction_method"],
+      "additionalProperties": false,
+      "properties": {
+        "extracted_at": { "type": "string", "format": "date-time" },
+        "source_file": { "type": "string" },
+        "source_type": { "type": "string", "enum": ["pdf", "image_png", "image_jpg", "image_other"] },
+        "page_count": { "type": "integer", "minimum": 1 },
+        "extraction_method": {
+          "type": "string",
+          "description": "Identificador del pipeline usado, ej: 'layoutlmv3+tatr+rules' o 'manual'"
+        },
+        "confidence_global": {
+          "type": ["number", "null"],
+          "minimum": 0, "maximum": 1,
+          "description": "Confianza promedio del extractor (0-1). null si no aplica."
+        },
+        "needs_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "Si true, la UI debe pedir al usuario validar antes de analizar."
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        }
+      }
+    },
+
+    "issuer": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["banco", "comisionista_bolsa", "fiduciaria", "cooperativa", "fintech", "otro"]
+        },
+        "nit": { "type": ["string", "null"] },
+        "country": {
+          "type": "string",
+          "description": "ISO 3166-1 alpha-2",
+          "pattern": "^[A-Z]{2}$",
+          "default": "CO"
+        }
+      }
+    },
+
+    "account_holder": {
+      "type": "object",
+      "required": ["full_name"],
+      "additionalProperties": false,
+      "properties": {
+        "full_name": { "type": "string" },
+        "id_type": { "type": ["string", "null"], "enum": ["CC", "CE", "TI", "NIT", "PAS", null] },
+        "id_number": { "type": ["string", "null"] },
+        "address": { "type": ["string", "null"] },
+        "city": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] },
+        "email": { "type": ["string", "null"], "format": "email" },
+        "advisor": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "email": { "type": ["string", "null"], "format": "email" },
+            "phone": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+
+    "period": {
+      "type": "object",
+      "required": ["start_date", "end_date"],
+      "additionalProperties": false,
+      "properties": {
+        "start_date": { "type": "string", "format": "date" },
+        "end_date":   { "type": "string", "format": "date" },
+        "issue_date": { "type": ["string", "null"], "format": "date" }
+      }
+    },
+
+    "currency": {
+      "type": "string",
+      "description": "ISO 4217. Moneda de referencia del extracto.",
+      "pattern": "^[A-Z]{3}$",
+      "default": "COP"
+    },
+
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "total_assets":       { "type": ["number", "null"] },
+        "total_liabilities":  { "type": ["number", "null"] },
+        "net_worth":          { "type": ["number", "null"] },
+        "previous_balance":   { "type": ["number", "null"] },
+        "period_change":      { "type": ["number", "null"] },
+        "period_change_pct":  { "type": ["number", "null"] }
+      }
+    },
+
+    "sections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Section" }
+    },
+
+    "alerts_raw": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Alertas o avisos textuales que el extracto trae explicitos. NO son alertas calculadas (esas las genera el analyzer)."
+    },
+
+    "raw_extracted_text": {
+      "type": ["string", "null"],
+      "description": "Texto bruto extraido por OCR. Opcional, solo para debug."
+    }
+  },
+
+  "$defs": {
+
+    "Money": {
+      "type": "object",
+      "required": ["amount", "currency"],
+      "additionalProperties": false,
+      "properties": {
+        "amount":   { "type": "number" },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" }
+      },
+      "description": "Cantidad monetaria con moneda explicita. Usar cuando una linea puede tener moneda distinta a la global."
+    },
+
+    "Section": {
+      "oneOf": [
+        { "$ref": "#/$defs/SectionCashBalance" },
+        { "$ref": "#/$defs/SectionFixedIncome" },
+        { "$ref": "#/$defs/SectionInvestmentFund" },
+        { "$ref": "#/$defs/SectionTransactions" }
+      ]
+    },
+
+    "SectionCashBalance": {
+      "type": "object",
+      "required": ["section_type", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "section_type": { "const": "cash_balance" },
+        "title":        { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["total"],
+            "additionalProperties": false,
+            "properties": {
+              "account_id":   { "type": ["string", "null"] },
+              "account_name": { "type": ["string", "null"] },
+              "available":    { "type": ["number", "null"] },
+              "blocked":      { "type": ["number", "null"] },
+              "in_transit":   { "type": ["number", "null"] },
+              "total":        { "type": "number" },
+              "currency":     { "type": "string", "pattern": "^[A-Z]{3}$" }
+            }
+          }
+        },
+        "subtotal": { "type": ["number", "null"] }
+      }
+    },
+
+    "SectionFixedIncome": {
+      "type": "object",
+      "required": ["section_type", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "section_type": { "const": "fixed_income" },
+        "title":        { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FixedIncomeItem" }
+        },
+        "subtotal": { "type": ["number", "null"] }
+      }
+    },
+
+    "FixedIncomeItem": {
+      "type": "object",
+      "required": ["instrument_id", "market_value"],
+      "additionalProperties": false,
+      "properties": {
+        "instrument_id":     { "type": "string" },
+        "instrument_type":   { "type": ["string", "null"], "enum": ["CDT", "TES", "BONO", "PAPEL_COMERCIAL", "OTRO", null] },
+        "issuer":            { "type": ["string", "null"] },
+        "issue_date":        { "type": ["string", "null"], "format": "date" },
+        "maturity_date":     { "type": ["string", "null"], "format": "date" },
+        "purchase_date":     { "type": ["string", "null"], "format": "date" },
+        "face_rate":         { "type": ["number", "null"], "description": "% anual nominal del titulo" },
+        "negotiated_rate":   { "type": ["number", "null"] },
+        "valuation_rate":    { "type": ["number", "null"] },
+        "rate_basis":        { "type": ["string", "null"], "enum": ["EA", "NA", "TV", "MV", "SV", "AV", null], "description": "Base de la tasa: Efectiva Anual, Nominal Anual, Trimestre/Mes/Semestre/Ano Vencido" },
+        "payment_frequency": { "type": ["string", "null"] },
+        "nominal_value":     { "type": ["number", "null"] },
+        "market_value":      { "type": "number" },
+        "currency":          { "type": "string", "pattern": "^[A-Z]{3}$" }
+      }
+    },
+
+    "SectionInvestmentFund": {
+      "type": "object",
+      "required": ["section_type", "fund", "movements"],
+      "additionalProperties": false,
+      "properties": {
+        "section_type": { "const": "investment_fund" },
+        "title":        { "type": "string" },
+        "fund": {
+          "type": "object",
+          "required": ["name"],
+          "additionalProperties": false,
+          "properties": {
+            "name":          { "type": "string" },
+            "code":          { "type": ["string", "null"] },
+            "administrator": { "type": ["string", "null"] },
+            "objective":     { "type": ["string", "null"] }
+          }
+        },
+        "movements": {
+          "type": "object",
+          "required": ["new_balance"],
+          "additionalProperties": false,
+          "properties": {
+            "previous_balance": { "type": ["number", "null"] },
+            "additions":        { "type": ["number", "null"] },
+            "withdrawals":      { "type": ["number", "null"] },
+            "returns":          { "type": ["number", "null"] },
+            "new_balance":      { "type": "number" },
+            "units":            { "type": ["number", "null"] },
+            "unit_value_end":   { "type": ["number", "null"] },
+            "currency":         { "type": "string", "pattern": "^[A-Z]{3}$" }
+          }
+        },
+        "historical_returns": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "description": "Rentabilidades historicas como decimales (0.0335 = 3.35%).",
+          "properties": {
+            "monthly":                  { "type": ["number", "null"] },
+            "semi_annual":              { "type": ["number", "null"] },
+            "ytd":                      { "type": ["number", "null"] },
+            "last_year":                { "type": ["number", "null"] },
+            "last_2_years_annualized":  { "type": ["number", "null"] },
+            "last_3_years_annualized":  { "type": ["number", "null"] }
+          }
+        }
+      }
+    },
+
+    "SectionTransactions": {
+      "type": "object",
+      "required": ["section_type", "account_id", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "section_type": { "const": "transactions" },
+        "title":        { "type": "string" },
+        "account_id":   { "type": "string" },
+        "account_type": { "type": ["string", "null"], "enum": ["ahorros", "corriente", "credito", "inversion", "otro", null] },
+        "currency":     { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Transaction" }
+        },
+        "totals": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "debits":       { "type": ["number", "null"] },
+            "credits":      { "type": ["number", "null"] },
+            "net":          { "type": ["number", "null"] },
+            "ending_balance": { "type": ["number", "null"] }
+          }
+        }
+      }
+    },
+
+    "Transaction": {
+      "type": "object",
+      "required": ["date", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "date":          { "type": "string", "format": "date" },
+        "value_date":    { "type": ["string", "null"], "format": "date", "description": "Fecha valor (cuando aplica), distinta de la fecha de movimiento" },
+        "description":   { "type": "string" },
+        "reference":     { "type": ["string", "null"] },
+        "category":      {
+          "type": ["string", "null"],
+          "description": "Categoria opcional para clasificar gastos/ingresos. Asignada por el usuario o por reglas, no por el extractor."
+        },
+        "debit":         { "type": ["number", "null"], "minimum": 0 },
+        "credit":        { "type": ["number", "null"], "minimum": 0 },
+        "balance_after": { "type": ["number", "null"] }
+      },
+      "description": "Movimiento individual. debit y credit son montos positivos; usar uno u otro segun direccion."
+    }
+  }
+}

@@ -26,7 +26,13 @@ set(SOURCES
     src/graph_generator.cpp
     src/csv_exporter.cpp
     src/ui_manager.cpp
+    src/extracto_loader.cpp
+    src/finance_config.cpp
+    src/standard_parser.cpp
 )
+
+# Copiar schema al build (para ejecutarse desde build/ con rutas relativas)
+file(COPY schema/ DESTINATION ${CMAKE_BINARY_DIR}/schema)
 
 add_executable(ProyectoPI ${SOURCES})
 
@@ -41,9 +47,19 @@ target_link_libraries(ProyectoPI
     nlohmann_json::nlohmann_json
 )
 
-# Copiar script Python y datos al directorio de build
-file(COPY python/ DESTINATION ${CMAKE_BINARY_DIR}/python)
-file(COPY data/ DESTINATION ${CMAKE_BINARY_DIR}/data)
+# Copiar datos al directorio de build (schema ya copiado arriba)
+file(COPY data/   DESTINATION ${CMAKE_BINARY_DIR}/data)
+
+# --- Verificacion de Tesseract en build time (informativo) ---
+find_program(TESSERACT_EXE tesseract)
+if(TESSERACT_EXE)
+    message(STATUS "Tesseract OCR encontrado: ${TESSERACT_EXE}")
+else()
+    message(WARNING
+        "Tesseract no encontrado en PATH. El binario compilara pero fallara en runtime.\n"
+        "  Linux:   sudo apt install tesseract-ocr tesseract-ocr-spa\n"
+        "  Windows: scoop install tesseract  (luego anadir spa.traineddata)")
+endif()
 
 # Crear directorios de salida en build
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/output/images)

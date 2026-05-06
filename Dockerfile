@@ -16,8 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libwxgtk3.0-gtk3-dev \
     nlohmann-json3-dev \
     poppler-utils \
-    python3 \
-    python3-pip \
+    # Tesseract OCR (reemplaza EasyOCR; OCR clasico, sin Python)
+    tesseract-ocr \
+    tesseract-ocr-spa \
+    tesseract-ocr-eng \
+    tesseract-ocr-osd \
     # Para la GUI (X11 forwarding)
     x11-apps \
     libgtk-3-0 \
@@ -28,27 +31,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     && rm -rf /var/lib/apt/lists/*
 
-# --- 2. EasyOCR y dependencias Python ---
-RUN pip3 install --no-cache-dir easyocr opencv-python-headless
-
-# --- 3. Pre-descargar modelo EasyOCR español ---
-# Esto evita que se descargue cada vez que se ejecuta
-RUN python3 -c "import easyocr; reader = easyocr.Reader(['es'], gpu=False); print('Modelo descargado OK')"
-
-# --- 4. Copiar proyecto ---
+# --- 2. Copiar proyecto ---
 WORKDIR /app
 COPY CMakeLists.txt .
 COPY src/ src/
-COPY python/ python/
 COPY data/ data/
+COPY schema/ schema/
 
-# --- 5. Compilar ---
+# --- 3. Compilar ---
 RUN mkdir build && cd build \
     && cmake .. \
     && make -j$(nproc) \
-    && echo "=== Compilación exitosa ==="
+    && echo "=== Compilacion exitosa ==="
 
-# --- 6. Directorio de trabajo en build ---
+# --- 4. Directorio de trabajo en build ---
 WORKDIR /app/build
 
 # Crear directorios de salida

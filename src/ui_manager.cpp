@@ -6,10 +6,12 @@
 #include "ocr_extractor.h"
 #include "graph_generator.h"
 #include "csv_exporter.h"
+#include "standard_parser.h"
 
 #include <wx/textdlg.h>
 #include <filesystem>
 #include <iostream>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
@@ -87,11 +89,12 @@ void MainFrame::createLayout() {
 
     // Notebook con tabs
     notebook_ = new wxNotebook(main_panel, wxID_ANY);
-    notebook_->AddPage(createResumenTab(notebook_), "Resumen");
+    notebook_->AddPage(createPreviewTab(notebook_),  "Vista previa");
+    notebook_->AddPage(createResumenTab(notebook_),  "Resumen");
     notebook_->AddPage(createRentaFijaTab(notebook_), "Renta Fija");
-    notebook_->AddPage(createFondosTab(notebook_), "Fondos");
-    notebook_->AddPage(createGraficasTab(notebook_), "Graficas");
-    notebook_->AddPage(createAnalisisTab(notebook_), "Analisis");
+    notebook_->AddPage(createFondosTab(notebook_),    "Fondos");
+    notebook_->AddPage(createGraficasTab(notebook_),  "Graficas");
+    notebook_->AddPage(createAnalisisTab(notebook_),  "Analisis");
     main_sizer->Add(notebook_, 1, wxEXPAND | wxALL, 5);
 
     // Log panel
@@ -171,6 +174,73 @@ wxPanel* MainFrame::createGraficasTab(wxNotebook* parent) {
     return panel;
 }
 
+wxPanel* MainFrame::createPreviewTab(wxNotebook* parent) {
+    auto* panel = new wxPanel(parent);
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+
+    lbl_preview_info_ = new wxStaticText(panel, wxID_ANY,
+        "Selecciona un archivo (PDF o imagen) para ver una vista previa.");
+    sizer->Add(lbl_preview_info_, 0, wxALL, 5);
+
+    scroll_preview_ = new wxScrolledWindow(panel, wxID_ANY);
+    scroll_preview_->SetScrollRate(10, 10);
+    auto* inner = new wxBoxSizer(wxVERTICAL);
+    panel_preview_ = new wxStaticBitmap(scroll_preview_, wxID_ANY, wxNullBitmap);
+    inner->Add(panel_preview_, 0, wxALL, 5);
+    scroll_preview_->SetSizer(inner);
+
+    sizer->Add(scroll_preview_, 1, wxEXPAND | wxALL, 5);
+    panel->SetSizer(sizer);
+    return panel;
+}
+
+bool MainFrame::isImageFile(const std::string& path) {
+    auto pos = path.find_last_of('.');
+    if (pos == std::string::npos) return false;
+    std::string ext = path.substr(pos + 1);
+    for (auto& c : ext) c = static_cast<char>(std::tolower(c));
+    return ext == "png" || ext == "jpg" || ext == "jpeg" ||
+           ext == "bmp" || ext == "tif" || ext == "tiff";
+}
+
+bool MainFrame::isPdfFile(const std::string& path) {
+    auto pos = path.find_last_of('.');
+    if (pos == std::string::npos) return false;
+    std::string ext = path.substr(pos + 1);
+    for (auto& c : ext) c = static_cast<char>(std::tolower(c));
+    return ext == "pdf";
+}
+
+void MainFrame::showPreview(const std::string& image_path) {
+    if (!fs::exists(image_path)) {
+        lbl_preview_info_->SetLabel("(Archivo no encontrado: " + image_path + ")");
+        return;
+    }
+
+    wxImage img;
+    if (!img.LoadFile(image_path)) {
+        lbl_preview_info_->SetLabel("(No se pudo cargar la imagen para vista previa)");
+        return;
+    }
+
+    // Reescalar manteniendo aspect ratio para no saturar la UI
+    const int max_w = 1000;
+    if (img.GetWidth() > max_w) {
+        double scale = static_cast<double>(max_w) / img.GetWidth();
+        img.Rescale(max_w, static_cast<int>(img.GetHeight() * scale),
+                    wxIMAGE_QUALITY_HIGH);
+    }
+
+    panel_preview_->SetBitmap(wxBitmap(img));
+    scroll_preview_->FitInside();
+    scroll_preview_->Layout();
+
+    std::string info = "Vista previa: " + fs::path(image_path).filename().string() +
+                       "  (" + std::to_string(img.GetWidth()) + " x " +
+                       std::to_string(img.GetHeight()) + " px)";
+    lbl_preview_info_->SetLabel(info);
+}
+
 wxPanel* MainFrame::createAnalisisTab(wxNotebook* parent) {
     auto* panel = new wxPanel(parent);
     auto* sizer = new wxBoxSizer(wxVERTICAL);
@@ -187,29 +257,55 @@ wxPanel* MainFrame::createAnalisisTab(wxNotebook* parent) {
 }
 
 void MainFrame::OnSelectPDF(wxCommandEvent&) {
-    wxFileDialog dlg(this, "Seleccionar extracto PDF", "", "",
-                     "Archivos PDF (*.pdf)|*.pdf", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    // Abrir el file picker en pdfs/examples si existe, sino pdfs/, sino cwd.
+    std::string default_dir;
+    if (fs::exists("pdfs/examples"))      default_dir = "pdfs/examples";
+    else if (fs::exists("pdfs"))           default_dir = "pdfs";
+    wxFileDialog dlg(this, "Seleccionar extracto (PDF o imagen)",
+                     default_dir.c_str(), "",
+                     "Extractos (*.pdf;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff)"
+                     "|*.pdf;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff"
+                     "|Archivos PDF (*.pdf)|*.pdf"
+                     "|Imagenes (*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff)"
+                     "|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dlg.ShowModal() == wxID_CANCEL) return;
 
     current_pdf_path_ = dlg.GetPath().ToStdString();
-    logMessage("PDF seleccionado: " + current_pdf_path_);
+    current_pdf_password_.clear();
+    logMessage("Archivo seleccionado: " + current_pdf_path_);
 
-    // Verificar si necesita contrasena
-    if (PDFProcessor::needsPassword(current_pdf_path_)) {
-        wxPasswordEntryDialog pwd_dlg(this,
-            "El PDF esta protegido. Ingrese la contrasena:",
-            "Contrasena PDF");
-        if (pwd_dlg.ShowModal() == wxID_OK) {
-            current_pdf_password_ = pwd_dlg.GetValue().ToStdString();
-            logMessage("Contrasena configurada.");
-        } else {
-            logMessage("Contrasena no proporcionada.");
-            return;
+    if (isPdfFile(current_pdf_path_)) {
+        if (PDFProcessor::needsPassword(current_pdf_path_)) {
+            wxPasswordEntryDialog pwd_dlg(this,
+                "El PDF esta protegido. Ingrese la contrasena:",
+                "Contrasena PDF");
+            if (pwd_dlg.ShowModal() == wxID_OK) {
+                current_pdf_password_ = pwd_dlg.GetValue().ToStdString();
+                logMessage("Contrasena configurada.");
+            } else {
+                logMessage("Contrasena no proporcionada.");
+                return;
+            }
         }
+        lbl_preview_info_->SetLabel(
+            "PDF cargado. La vista previa se mostrara despues de procesar.");
+        panel_preview_->SetBitmap(wxNullBitmap);
+        scroll_preview_->FitInside();
+        lbl_status_->SetLabel("PDF cargado. Presione Procesar.");
+    } else if (isImageFile(current_pdf_path_)) {
+        showPreview(current_pdf_path_);
+        notebook_->SetSelection(0);  // ir a la pestana Vista previa
+        lbl_status_->SetLabel("Imagen cargada. Presione Procesar.");
+        logMessage("Imagen lista. Saltando conversion PDF.");
+    } else {
+        logMessage("Tipo de archivo no soportado.");
+        wxMessageBox("Tipo de archivo no soportado. Use PDF o imagen.",
+                     "Error", wxICON_ERROR);
+        return;
     }
 
     btn_procesar_->Enable(true);
-    lbl_status_->SetLabel("PDF cargado. Presione Procesar.");
 }
 
 void MainFrame::OnProcess(wxCommandEvent&) {
@@ -241,45 +337,62 @@ void MainFrame::processExtracto() {
         std::string pdf_path = current_pdf_path_;
         std::string pdf_password = current_pdf_password_;
 
-        // 1. PDF -> imagenes
-        CallAfter([this]() {
-            logMessage("[1/7] Convirtiendo PDF a imagenes...");
-            setProgress(5);
-        });
+        // 1. Obtener imagenes a procesar (de PDF o de input directo)
+        std::vector<std::string> images;
 
-        PDFProcessor pdf;
-        if (!pdf_password.empty()) {
-            pdf.setPassword(pdf_password);
-        }
-        auto images = pdf.convertToImages(pdf_path, "output/images", 300);
-
-        if (images.empty()) {
+        if (isImageFile(pdf_path)) {
             CallAfter([this]() {
-                logMessage("ERROR: No se generaron imagenes del PDF.");
-                lbl_status_->SetLabel("Error en conversion.");
-                processing_ = false;
-                btn_procesar_->Enable(true);
+                logMessage("[1/7] Input es imagen, saltando conversion PDF.");
+                setProgress(15);
             });
-            return;
-        }
+            images.push_back(pdf_path);
+            CallAfter([this, pdf_path]() {
+                showPreview(pdf_path);
+            });
+        } else {
+            CallAfter([this]() {
+                logMessage("[1/7] Convirtiendo PDF a imagenes...");
+                setProgress(5);
+            });
 
-        int num_pages = static_cast<int>(images.size());
-        std::string pages_msg = std::to_string(num_pages) + " paginas convertidas.";
-        CallAfter([this, pages_msg]() {
-            logMessage(pages_msg);
-            setProgress(15);
-        });
+            PDFProcessor pdf;
+            if (!pdf_password.empty()) {
+                pdf.setPassword(pdf_password);
+            }
+            images = pdf.convertToImages(pdf_path, "output/images", 300);
+
+            if (images.empty()) {
+                CallAfter([this]() {
+                    logMessage("ERROR: No se generaron imagenes del PDF.");
+                    lbl_status_->SetLabel("Error en conversion.");
+                    processing_ = false;
+                    btn_procesar_->Enable(true);
+                });
+                return;
+            }
+
+            int num_pages = static_cast<int>(images.size());
+            std::string pages_msg = std::to_string(num_pages) + " paginas convertidas.";
+            std::string first_img = images.front();
+            CallAfter([this, pages_msg, first_img]() {
+                logMessage(pages_msg);
+                setProgress(15);
+                showPreview(first_img);  // mostrar primera pagina del PDF como preview
+            });
+        }
 
         // 2. Iniciar OCR server
         CallAfter([this]() {
-            logMessage("[2/7] Iniciando servidor OCR...");
+            logMessage("[2/7] Inicializando Tesseract OCR...");
             setProgress(20);
         });
 
         OCRExtractor ocr;
         if (!ocr.startServer()) {
             CallAfter([this]() {
-                logMessage("ERROR: No se pudo iniciar el servidor OCR.");
+                logMessage("ERROR: Tesseract OCR no disponible. Instala con:");
+                logMessage("  Linux:   sudo apt install tesseract-ocr tesseract-ocr-spa");
+                logMessage("  Windows: scoop install tesseract  (+ spa.traineddata)");
                 lbl_status_->SetLabel("Error OCR.");
                 processing_ = false;
                 btn_procesar_->Enable(true);
@@ -293,6 +406,8 @@ void MainFrame::processExtracto() {
         DataStructurer structurer;
         ExtractoCompleto extracto;
 
+        const int num_pages = static_cast<int>(images.size());
+
         // 3. Procesar cada pagina
         for (int i = 0; i < num_pages; ++i) {
             int page_num = i + 1;
@@ -304,10 +419,44 @@ void MainFrame::processExtracto() {
                 setProgress(progress);
             });
 
-            cv::Mat img = cv::imread(images[i]);
-            if (img.empty()) continue;
+            cv::Mat img_raw = cv::imread(images[i]);
+            if (img_raw.empty()) continue;
 
-            cv::Mat preprocessed = preproc.fullPreprocess(img);
+            // Pipeline robusto: detecta documento, corrige perspectiva,
+            // rota, mejora contraste y reduce ruido. Funciona para fotos
+            // de celular y escaneos por igual.
+            // Debug-dir solo si PROYECTOPI_DEBUG_PREPROC=1 (evita escribir
+            // ~12 PNGs por pagina en disco por defecto).
+            if (std::getenv("PROYECTOPI_DEBUG_PREPROC")) {
+                preproc.setDebugDir("output/preprocessing_debug/page_" +
+                                    std::to_string(page_num));
+            }
+            PreprocessReport rep;
+            cv::Mat img = preproc.enhanceForOCR(img_raw, &rep);
+
+            std::string prep_msg = "  Preproc pag " + std::to_string(page_num) +
+                ": doc=" + (rep.document_detected ? "SI" : "NO") +
+                " rot=" + std::to_string(static_cast<int>(rep.rotation_corrected_deg)) + "°" +
+                " sharp=" + std::to_string(static_cast<int>(rep.sharpness_score));
+            CallAfter([this, prep_msg]() { logMessage(prep_msg); });
+            if (!rep.warning.empty()) {
+                std::string w = rep.warning;
+                CallAfter([this, w]() { logMessage("  AVISO: " + w); });
+            }
+
+            // Intentar primero el parser del template estandar v1.
+            {
+                auto ocr_data = ocr.extractAll(img);
+                if (StandardParser::detectStandardTemplate(ocr_data)) {
+                    StandardParser::parseAll(ocr_data, extracto);
+                    std::string m = "  Pagina " + std::to_string(page_num) +
+                                    " -> template estandar v1";
+                    CallAfter([this, m]() { logMessage(m); });
+                    continue;
+                }
+            }
+
+            // Pipeline legacy (A&V)
             PageType type = classifier.classify(img);
 
             std::string type_str = PageClassifier::pageTypeToString(type);
@@ -674,9 +823,78 @@ void MainFrame::updateAnalisisDisplay(const AnalysisResult& analysis) {
     setRow("Tasa Negociacion", fmtStat("", analysis.tasas_negociacion));
     setRow("Tasa Facial", fmtStat("", analysis.tasas_faciales));
 
+    // ============================================================
+    // METRICAS AVANZADAS (Tier 1 + Tier 2) - todas con formulas
+    // ============================================================
+    const auto& a = analysis.avanzadas;
+
+    auto fmtPct = [](double v, int dec = 2) {
+        std::ostringstream o; o << std::fixed << std::setprecision(dec) << v << "%";
+        return o.str();
+    };
+    auto fmtNum = [](double v, int dec = 2) {
+        std::ostringstream o; o << std::fixed << std::setprecision(dec) << v;
+        return o.str();
+    };
+    auto fmtMoney = [](double v) {
+        std::ostringstream o;
+        if      (std::abs(v) >= 1e9) o << std::fixed << std::setprecision(2) << "$" << v / 1e9 << "B";
+        else if (std::abs(v) >= 1e6) o << std::fixed << std::setprecision(2) << "$" << v / 1e6 << "M";
+        else                          o << std::fixed << std::setprecision(0) << "$" << v;
+        return o.str();
+    };
+
+    setRow("=== RENDIMIENTO ===", "");
+    setRow("Yield ponderado (TIR)",       fmtPct(a.yield_ponderado_pct));
+    setRow("Yield facial ponderado",      fmtPct(a.yield_facial_ponderado_pct));
+    setRow("Spread promedio",             fmtPct(a.spread_promedio_pct));
+    setRow("Crecimiento del periodo",     fmtPct(a.crecimiento_periodo_pct));
+    setRow("Crecimiento anualizado",      fmtPct(a.crecimiento_anualizado_pct));
+    setRow("Retorno real (Fisher)",       fmtPct(a.retorno_real_pct));
+
+    setRow("=== RIESGO DE TASA ===", "");
+    setRow("Duracion Macaulay (anos)",    fmtNum(a.duracion_macaulay_anos, 3));
+    setRow("Duracion modificada",         fmtNum(a.duracion_modificada, 3) +
+                                            " (% perdida si tasas suben 1%)");
+
+    setRow("=== CONCENTRACION ===", "");
+    setRow("HHI",                         fmtNum(a.hhi, 0) + " (" + a.hhi_categoria + ")");
+    setRow("Top-1 exposure",              fmtPct(a.top1_exposure_pct, 1));
+    setRow("Top-3 exposure",              fmtPct(a.top3_exposure_pct, 1));
+    setRow("Top-5 exposure",              fmtPct(a.top5_exposure_pct, 1));
+
+    setRow("=== VENCIMIENTOS ===", "");
+    setRow("Dias promedio (ponderado)",   fmtNum(a.dias_promedio_vencimiento, 0) + " dias");
+    for (const auto& [bucket, monto] : a.vencimientos_buckets) {
+        int n = a.vencimientos_count.count(bucket) ? a.vencimientos_count.at(bucket) : 0;
+        setRow("Bucket " + bucket,
+               fmtMoney(monto) + " (" + std::to_string(n) + " CDT)");
+    }
+
+    setRow("=== FIC ===", "");
+    setRow("Rentabilidad anual",          fmtPct(a.rentab_fic_anual_pct));
+    setRow("Sigma (vol estimada)",        fmtPct(a.sigma_fic_pct));
+    setRow("Sharpe Ratio",                fmtNum(a.sharpe_fic, 3));
+
+    setRow("=== SERIE TEMPORAL ===", "");
+    setRow("Max Drawdown",                fmtPct(a.max_drawdown_pct));
+    setRow("Drawdown actual",             fmtPct(a.current_drawdown_pct));
+
+    setRow("=== ESTADISTICA AVANZADA ===", "");
+    setRow("Skewness tasas",              fmtNum(a.skewness_tasas, 3));
+    setRow("Kurtosis tasas",              fmtNum(a.kurtosis_tasas, 3));
+    setRow("Coef. Variacion (CV)",        fmtNum(a.cv_tasas, 4));
+    setRow("IC 95% tasas",                "[" + fmtPct(a.ci95_lower) + " ; " +
+                                            fmtPct(a.ci95_upper) + "]");
+
+    setRow("=== CONFIGURACION ===", "");
+    setRow("Tasa libre riesgo",           fmtPct(a.config_usada.tasa_libre_riesgo * 100));
+    setRow("Inflacion",                   fmtPct(a.config_usada.inflacion_anual * 100));
+    setRow("Benchmark",                   fmtPct(a.config_usada.benchmark_rendto * 100));
+
     setRow("=== ALERTAS ===", "");
-    for (const auto& a : analysis.alertas) {
-        setRow("[" + a.type + "]", a.message);
+    for (const auto& al : analysis.alertas) {
+        setRow("[" + al.type + "]", al.message);
     }
 
     grid_analisis_->AutoSize();
