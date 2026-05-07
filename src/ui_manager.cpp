@@ -12,8 +12,49 @@
 #include <filesystem>
 #include <iostream>
 #include <cstdlib>
+#include <sstream>
+#include <iomanip>
+#include <cmath>
 
 namespace fs = std::filesystem;
+
+// =============================================================
+// Helpers de formato colombiano para mostrar valores en la GUI.
+//   formatCOPMoney(1234567.89)  -> "$ 1.234.567,89"
+//   formatCOPNumber(1234567.89) -> "1.234.567,89"
+//   formatCOPPercent(4.46)      -> "4,46 %"
+// Reglas: '.' como separador de miles, ',' como decimal.
+// =============================================================
+static std::string formatCOPNumber(double v, int decimals = 2) {
+    std::ostringstream raw;
+    raw << std::fixed << std::setprecision(decimals) << std::abs(v);
+    std::string s = raw.str();
+    // Separar parte entera y decimal por el "."
+    std::string ent = s, dec_part;
+    auto dot = s.find('.');
+    if (dot != std::string::npos) {
+        ent      = s.substr(0, dot);
+        dec_part = s.substr(dot + 1);
+    }
+    // Insertar puntos de miles desde la derecha cada 3 digitos
+    std::string out;
+    int count = 0;
+    for (auto it = ent.rbegin(); it != ent.rend(); ++it) {
+        if (count && count % 3 == 0) out.push_back('.');
+        out.push_back(*it);
+        count++;
+    }
+    std::reverse(out.begin(), out.end());
+    if (!dec_part.empty()) out += "," + dec_part;
+    if (v < 0) out = "-" + out;
+    return out;
+}
+static std::string formatCOPMoney(double v) {
+    return "$ " + formatCOPNumber(v, 2);
+}
+static std::string formatCOPPercent(double v, int decimals = 2) {
+    return formatCOPNumber(v, decimals) + " %";
+}
 
 wxIMPLEMENT_APP_NO_MAIN(InvestmentApp);
 
@@ -746,25 +787,11 @@ void MainFrame::updateResumenDisplay(const ExtractoCompleto& extracto) {
     setRow("Asesor", r.asesor);
 
     for (const auto& [key, val] : r.activos) {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << val;
-        setRow(key, "$" + oss.str());
+        setRow(key, formatCOPMoney(val));
     }
-    {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << r.total_activos;
-        setRow("Total Activos", "$" + oss.str());
-    }
-    {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << r.total_pasivos;
-        setRow("Total Pasivos", "$" + oss.str());
-    }
-    {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << r.total_portafolio;
-        setRow("TOTAL PORTAFOLIO", "$" + oss.str());
-    }
+    setRow("Total Activos",    formatCOPMoney(r.total_activos));
+    setRow("Total Pasivos",    formatCOPMoney(r.total_pasivos));
+    setRow("TOTAL PORTAFOLIO", formatCOPMoney(r.total_portafolio));
 
     grid_resumen_->AutoSize();
 }
@@ -781,19 +808,12 @@ void MainFrame::updateRentaFijaDisplay(const ExtractoCompleto& extracto) {
         grid_renta_fija_->SetCellValue(row, 1, inst.fecha_emision);
         grid_renta_fija_->SetCellValue(row, 2, inst.fecha_vencimiento);
         grid_renta_fija_->SetCellValue(row, 3, inst.fecha_compra);
-
-        auto fmt = [](double v) -> std::string {
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << v;
-            return oss.str();
-        };
-
-        grid_renta_fija_->SetCellValue(row, 4, fmt(inst.tasa_facial) + "%");
+        grid_renta_fija_->SetCellValue(row, 4, formatCOPPercent(inst.tasa_facial));
         grid_renta_fija_->SetCellValue(row, 5, inst.periodicidad);
-        grid_renta_fija_->SetCellValue(row, 6, fmt(inst.valor_nominal));
-        grid_renta_fija_->SetCellValue(row, 7, fmt(inst.tasa_negociacion) + "%");
-        grid_renta_fija_->SetCellValue(row, 8, fmt(inst.tasa_valoracion) + "%");
-        grid_renta_fija_->SetCellValue(row, 9, fmt(inst.valor_mercado));
+        grid_renta_fija_->SetCellValue(row, 6, formatCOPMoney(inst.valor_nominal));
+        grid_renta_fija_->SetCellValue(row, 7, formatCOPPercent(inst.tasa_negociacion));
+        grid_renta_fija_->SetCellValue(row, 8, formatCOPPercent(inst.tasa_valoracion));
+        grid_renta_fija_->SetCellValue(row, 9, formatCOPMoney(inst.valor_mercado));
     }
     grid_renta_fija_->AutoSize();
 }
@@ -814,23 +834,16 @@ void MainFrame::updateFondosDisplay(const ExtractoCompleto& extracto) {
         setRow("Codigo", fondo.codigo);
         setRow("Inversionista", fondo.nombre_inversionista);
         setRow("Identificacion", fondo.identificacion);
-
-        auto fmt = [](double v) -> std::string {
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << v;
-            return oss.str();
-        };
-
-        setRow("Saldo Anterior", "$" + fmt(fondo.saldo_anterior));
-        setRow("Adiciones", "$" + fmt(fondo.adiciones));
-        setRow("Retiros", "$" + fmt(fondo.retiros));
-        setRow("Rendimientos", "$" + fmt(fondo.rendimientos));
-        setRow("Nuevo Saldo", "$" + fmt(fondo.nuevo_saldo));
-        setRow("Unidades", fmt(fondo.unidades));
-        setRow("Valor Unidad", "$" + fmt(fondo.valor_unidad_final));
+        setRow("Saldo Anterior", formatCOPMoney(fondo.saldo_anterior));
+        setRow("Adiciones",      formatCOPMoney(fondo.adiciones));
+        setRow("Retiros",        formatCOPMoney(fondo.retiros));
+        setRow("Rendimientos",   formatCOPMoney(fondo.rendimientos));
+        setRow("Nuevo Saldo",    formatCOPMoney(fondo.nuevo_saldo));
+        setRow("Unidades",       formatCOPNumber(fondo.unidades, 4));
+        setRow("Valor Unidad",   formatCOPMoney(fondo.valor_unidad_final));
 
         for (const auto& [periodo, val] : fondo.rentabilidades_historicas) {
-            setRow("Rentab. " + periodo, fmt(val) + "%");
+            setRow("Rentab. " + periodo, formatCOPPercent(val));
         }
         setRow("---", "---");
     }
@@ -850,44 +863,30 @@ void MainFrame::updateAnalisisDisplay(const AnalysisResult& analysis) {
 
     setRow("=== COMPOSICION ===", "");
     for (const auto& [key, val] : analysis.composicion_porcentaje) {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(1) << val << "%";
-        setRow(key, oss.str());
+        setRow(key, formatCOPPercent(val, 1));
     }
 
-    auto fmtStat = [](const std::string& name, const StatSummary& s) -> std::string {
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2)
-            << "Media=" << s.mean << ", Desv=" << s.std_dev
-            << ", Med=" << s.median << " [" << s.min_val << " - " << s.max_val << "]";
-        return oss.str();
+    auto fmtStat = [](const std::string&, const StatSummary& s) -> std::string {
+        return "Media=" + formatCOPPercent(s.mean) +
+               ", Desv=" + formatCOPPercent(s.std_dev) +
+               ", Med="  + formatCOPPercent(s.median) +
+               " [" + formatCOPPercent(s.min_val) +
+               " - " + formatCOPPercent(s.max_val) + "]";
     };
 
     setRow("=== TASAS ===", "");
-    setRow("Tasa Valoracion", fmtStat("", analysis.tasas_valoracion));
+    setRow("Tasa Valoracion",  fmtStat("", analysis.tasas_valoracion));
     setRow("Tasa Negociacion", fmtStat("", analysis.tasas_negociacion));
-    setRow("Tasa Facial", fmtStat("", analysis.tasas_faciales));
+    setRow("Tasa Facial",      fmtStat("", analysis.tasas_faciales));
 
     // ============================================================
     // METRICAS AVANZADAS (Tier 1 + Tier 2) - todas con formulas
     // ============================================================
     const auto& a = analysis.avanzadas;
 
-    auto fmtPct = [](double v, int dec = 2) {
-        std::ostringstream o; o << std::fixed << std::setprecision(dec) << v << "%";
-        return o.str();
-    };
-    auto fmtNum = [](double v, int dec = 2) {
-        std::ostringstream o; o << std::fixed << std::setprecision(dec) << v;
-        return o.str();
-    };
-    auto fmtMoney = [](double v) {
-        std::ostringstream o;
-        if      (std::abs(v) >= 1e9) o << std::fixed << std::setprecision(2) << "$" << v / 1e9 << "B";
-        else if (std::abs(v) >= 1e6) o << std::fixed << std::setprecision(2) << "$" << v / 1e6 << "M";
-        else                          o << std::fixed << std::setprecision(0) << "$" << v;
-        return o.str();
-    };
+    auto fmtPct = [](double v, int dec = 2) { return formatCOPPercent(v, dec); };
+    auto fmtNum = [](double v, int dec = 2) { return formatCOPNumber(v, dec); };
+    auto fmtMoney = [](double v) { return formatCOPMoney(v); };
 
     setRow("=== RENDIMIENTO ===", "");
     setRow("Yield ponderado (TIR)",       fmtPct(a.yield_ponderado_pct));
