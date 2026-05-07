@@ -273,6 +273,9 @@ void MainFrame::OnSelectPDF(wxCommandEvent&) {
 
     current_pdf_path_ = dlg.GetPath().ToStdString();
     current_pdf_password_.clear();
+    // Limpiar resultados de cualquier procesamiento anterior — evita que
+    // queden datos viejos visibles cuando se carga un archivo nuevo.
+    clearResultsDisplay();
     logMessage("Archivo seleccionado: " + current_pdf_path_);
 
     if (isPdfFile(current_pdf_path_)) {
@@ -322,6 +325,9 @@ void MainFrame::OnProcess(wxCommandEvent&) {
     btn_procesar_->Enable(false);
     btn_exportar_csv_->Enable(false);
     progress_bar_->SetValue(0);
+    // Tambien limpiar antes de procesar (por si el usuario re-procesa el
+    // mismo archivo o vuelve a darle Procesar tras editar algo).
+    clearResultsDisplay();
     lbl_status_->SetLabel("Procesando...");
     logMessage("Iniciando procesamiento del extracto...");
 
@@ -329,6 +335,45 @@ void MainFrame::OnProcess(wxCommandEvent&) {
     std::thread([this]() {
         processExtracto();
     }).detach();
+}
+
+// Limpia todas las pestanas y widgets de resultado para que la UI no
+// muestre datos viejos cuando se carga un archivo nuevo.
+void MainFrame::clearResultsDisplay() {
+    // Resumen: vaciar valores pero mantener etiquetas de columna
+    if (grid_resumen_ && grid_resumen_->GetNumberRows() > 0) {
+        for (int r = 0; r < grid_resumen_->GetNumberRows(); ++r) {
+            grid_resumen_->SetCellValue(r, 0, "");
+            grid_resumen_->SetCellValue(r, 1, "");
+        }
+    }
+    // Renta Fija: borrar TODAS las filas (se recrean al procesar)
+    if (grid_renta_fija_ && grid_renta_fija_->GetNumberRows() > 0) {
+        grid_renta_fija_->DeleteRows(0, grid_renta_fija_->GetNumberRows());
+    }
+    // Fondos: vaciar valores
+    if (grid_fondos_ && grid_fondos_->GetNumberRows() > 0) {
+        for (int r = 0; r < grid_fondos_->GetNumberRows(); ++r) {
+            grid_fondos_->SetCellValue(r, 0, "");
+            grid_fondos_->SetCellValue(r, 1, "");
+        }
+    }
+    // Analisis: vaciar valores
+    if (grid_analisis_ && grid_analisis_->GetNumberRows() > 0) {
+        for (int r = 0; r < grid_analisis_->GetNumberRows(); ++r) {
+            grid_analisis_->SetCellValue(r, 0, "");
+            grid_analisis_->SetCellValue(r, 1, "");
+        }
+    }
+    // Lista de graficas y panel de imagen
+    if (list_graficas_) list_graficas_->Clear();
+    if (panel_grafica_) panel_grafica_->SetBitmap(wxNullBitmap);
+    if (scroll_grafica_) scroll_grafica_->FitInside();
+    // Datos en memoria
+    current_extracto_ = ExtractoCompleto{};
+    current_analysis_ = AnalysisResult{};
+    graph_paths_.clear();
+    if (btn_exportar_csv_) btn_exportar_csv_->Enable(false);
 }
 
 void MainFrame::processExtracto() {

@@ -73,6 +73,7 @@ private:
     void OnProcessComplete(wxCommandEvent& event);
 
     void processExtracto();
+    void clearResultsDisplay();    // Limpia todas las pestanas / widgets de resultado
     void updateResumenDisplay(const ExtractoCompleto& extracto);
     void updateRentaFijaDisplay(const ExtractoCompleto& extracto);
     void updateFondosDisplay(const ExtractoCompleto& extracto);
