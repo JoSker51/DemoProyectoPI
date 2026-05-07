@@ -94,9 +94,13 @@ std::vector<Line> groupLines(const std::vector<OCRResult>& ocr) {
         if (r.text.empty()) continue;
         int yc = r.bbox.y + r.bbox.height / 2;
         bool placed = false;
+        // Tolerancia: 60% de la altura del bloque, minimo 14 px. Esto
+        // une bloques de la misma fila incluso cuando OCR los reporta
+        // con Y ligeramente distintas (caracteres altos como '|', tildes).
+        int tol = std::max(14, static_cast<int>(r.bbox.height * 0.6));
         for (auto& L : lines) {
             int Lc = L.yCenter();
-            if (std::abs(yc - Lc) <= std::max(8, r.bbox.height / 2)) {
+            if (std::abs(yc - Lc) <= tol) {
                 L.blocks.push_back(r);
                 L.y_top = std::min(L.y_top, r.bbox.y);
                 L.y_bot = std::max(L.y_bot, r.bbox.y + r.bbox.height);
@@ -206,8 +210,16 @@ bool blockStartsKnownLabel(const std::string& blocktext) {
     if (norm.empty()) return false;
     for (const auto& L : KNOWN_LABELS) {
         auto toks = splitTokens(L);
-        if (!toks.empty() && toUpperAscii(toks.front()) == up) return true;
-        if (normalizeLabel(L) == norm) return true;
+        // Fuzzy match para tolerar OCR garbled (ej. "NITICC:" en vez de "NIT/CC:")
+        if (!toks.empty()) {
+            std::string first_up = toUpperAscii(toks.front());
+            int td = static_cast<int>(first_up.size()) >= 5 ? 1 : 0;
+            if (levenshtein(up, first_up) <= td) return true;
+        }
+        std::string label_norm = normalizeLabel(L);
+        int max_d = std::min(2, static_cast<int>(label_norm.size()) / 4);
+        if (std::abs(static_cast<int>(norm.size()) - static_cast<int>(label_norm.size())) <= 2 &&
+            levenshtein(norm, label_norm) <= max_d) return true;
     }
     return false;
 }
@@ -286,9 +298,11 @@ std::string textAfterLabel(const Line& line, const std::string& label) {
     return s;
 }
 
-// Convierte fecha "DD-MM-YYYY" -> "YYYY-MM-DD" (ISO). Si no matchea, devuelve original.
+// Convierte fecha "DD-MM-YYYY" -> "YYYY-MM-DD" (ISO). Acepta como
+// separadores '-', '/', '.', ' ' (Tesseract a veces lee guiones como
+// espacios o puntos). Si no matchea, devuelve original.
 std::string toISODate(const std::string& s) {
-    static const std::regex re_dmY(R"((\d{1,2})-(\d{1,2})-(\d{4}))");
+    static const std::regex re_dmY(R"((\d{1,2})[-./ ](\d{1,2})[-./ ](\d{4}))");
     std::smatch m;
     if (std::regex_search(s, m, re_dmY)) {
         char buf[16];
@@ -551,7 +565,9 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
             // El template tiene 10 columnas semanticamente fijas:
             //   nemo | F.Emi | F.Vto | F.Cmp | T.Facial | Period |
             //   Vlr.Nominal | T.Negoc | T.Valor | Vlr.Mercado
-            static const std::regex re_date(R"(\d{1,2}-\d{1,2}-\d{4})");
+            // Date: acepta DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY o DD MM YYYY
+            // (OCR a veces lee guiones como espacios o puntos).
+            static const std::regex re_date(R"(\d{1,2}[-./ ]\d{1,2}[-./ ]\d{4})");
             static const std::regex re_percent(R"([\d\.]+,\d{1,2}\s*%)");
             static const std::regex re_money(R"(\$\s*[\d\.]+,\d{2})");
 
@@ -576,27 +592,51 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
                 if (row.blocks.empty()) continue;
                 std::string text_full = row.text();
 
-                // Extraer todas las fechas, porcentajes, dineros del texto completo
-                auto dates    = findAll(text_full, re_date);
-                auto percents = findAll(text_full, re_percent);
-                auto monies   = findAll(text_full, re_money);
+                // Pre-procesar: Tesseract fragmenta numeros con espacios
+                // (ej. "1.355 271 000,00" en vez de "1.355.271.000,00").
+                // Colapsamos espacios entre digitos como puntos para que
+                // los regex agarren los valores completos.
+                std::string text_norm = text_full;
+                static const std::regex re_space_between_digits(R"((\d) +(\d))");
+                for (int pass = 0; pass < 4; ++pass) {
+                    std::string after = std::regex_replace(text_norm,
+                                                            re_space_between_digits, "$1.$2");
+                    if (after == text_norm) break;
+                    text_norm = after;
+                }
+
+                // Extraer todas las fechas, porcentajes, dineros del texto normalizado.
+                // Tambien las fechas matchean el formato con espacios convertidos a puntos.
+                auto dates    = findAll(text_norm, re_date);
+                auto percents = findAll(text_norm, re_percent);
+                auto monies   = findAll(text_norm, re_money);
                 if (monies.size() < 2) {
                     // Buscar tambien numeros sin $ (a veces el OCR perdia el simbolo)
                     auto loose = findAll(text_full, re_money_loose);
                     for (const auto& s : loose) monies.push_back("$" + s);
                 }
 
-                // Nemotecnico: todo el texto antes de la primera fecha
+                // Nemotecnico: bloques iniciales que NO sean fechas/dineros/
+                // porcentajes (los datos numericos de la tabla). Iteramos
+                // bloque por bloque y paramos al toparnos con uno que sea
+                // o forme parte de un campo numerico.
                 std::string nemo;
                 std::string period;
-                if (!dates.empty()) {
-                    auto pos = text_full.find(dates[0]);
-                    if (pos != std::string::npos) {
-                        nemo = text_full.substr(0, pos);
-                    }
+                static const std::regex re_block_is_date(R"(^\s*\d{1,2}([-./ ]\d{1,2}([-./ ]\d{4})?)?\s*$)");
+                static const std::regex re_block_is_pct(R"([\d\.]+,\d+\s*%?$)");
+                static const std::regex re_block_has_money(R"(\$|[\d\.]+,\d{2})");
+                for (const auto& b : row.blocks) {
+                    std::string t = b.text;
+                    // Trim
+                    while (!t.empty() && std::isspace(static_cast<unsigned char>(t.front()))) t.erase(t.begin());
+                    while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
+                    if (t.empty()) continue;
+                    if (std::regex_search(t, re_block_is_date)) break;
+                    if (std::regex_search(t, re_block_is_pct))  break;
+                    if (std::regex_search(t, re_block_has_money)) break;
+                    if (!nemo.empty()) nemo += " ";
+                    nemo += t;
                 }
-                // Trim y limpieza
-                while (!nemo.empty() && std::isspace(static_cast<unsigned char>(nemo.back()))) nemo.pop_back();
 
                 // Periodicidad: bloque corto (1-3 chars) entre las fechas
                 // y los porcentajes. Ej. "TV", "MV", "AV", "CV".
