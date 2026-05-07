@@ -16,10 +16,53 @@ std::string toUpperAscii(const std::string& s) {
     return out;
 }
 
+// Distancia de Levenshtein (numero minimo de inserciones/eliminaciones/
+// substituciones para convertir a en b). Usada para fuzzy matching de
+// labels cuando OCR confunde caracteres en imagenes de baja resolucion
+// (ej. 'Cliente' -> 'Ciela' o 'C ierfar', 'RESUMEN' -> 'RESUBEN').
+int levenshtein(const std::string& a, const std::string& b) {
+    int m = static_cast<int>(a.size()), n = static_cast<int>(b.size());
+    if (m == 0) return n;
+    if (n == 0) return m;
+    std::vector<int> prev(n + 1), curr(n + 1);
+    for (int j = 0; j <= n; ++j) prev[j] = j;
+    for (int i = 1; i <= m; ++i) {
+        curr[0] = i;
+        for (int j = 1; j <= n; ++j) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            curr[j] = std::min({curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost});
+        }
+        std::swap(prev, curr);
+    }
+    return prev[n];
+}
+
+// True si en algun punto del haystack aparece needle con distancia <= max_dist.
+// Compara substrings de longitud parecida a needle. O(haystack * needle).
+bool fuzzyContains(const std::string& haystack, const std::string& needle,
+                    int max_dist = 2) {
+    std::string h = toUpperAscii(haystack);
+    std::string n = toUpperAscii(needle);
+    if (h.size() < n.size()) {
+        return levenshtein(h, n) <= max_dist;
+    }
+    // Sliding window: probar cada substring de h del tamano de n (+- max_dist)
+    int nl = static_cast<int>(n.size());
+    for (size_t i = 0; i + n.size() <= h.size() + max_dist + 1; ++i) {
+        for (int len = std::max(1, nl - max_dist); len <= nl + max_dist; ++len) {
+            if (i + len > h.size()) continue;
+            if (levenshtein(h.substr(i, len), n) <= max_dist) return true;
+        }
+    }
+    return false;
+}
+
 bool containsAll(const std::string& haystack, const std::vector<std::string>& needles) {
-    std::string up = toUpperAscii(haystack);
+    // Use fuzzy contains; tolera 2 errores por palabra de >= 5 chars,
+    // 1 error para 3-4 chars, exacto para palabras muy cortas.
     for (const auto& n : needles) {
-        if (up.find(toUpperAscii(n)) == std::string::npos) return false;
+        int max_d = (n.size() >= 5) ? 2 : (n.size() >= 3 ? 1 : 0);
+        if (!fuzzyContains(haystack, n, max_d)) return false;
     }
     return true;
 }
@@ -180,32 +223,50 @@ int findLabelEnd(const Line& line, const std::string& label) {
     auto toks = splitTokens(label);
     if (toks.empty()) return -1;
     std::string label_norm = normalizeLabel(label);
+    // Tolerancia fuzzy moderada: 1 char por cada 4 chars del label,
+    // con tope de 2. Evita falsos matches en labels cortos como "NIT:".
+    int max_dist = std::min(2, static_cast<int>(label_norm.size()) / 4);
 
-    // Caso 1: label en un solo bloque (con espacios internos o no)
-    // Ejemplo: bloque "Saldo Anterior:" o "SaldoAnterior:" ambos matchean.
+    // Caso 1: label en un solo bloque, con tolerancia Levenshtein.
+    // Match EXACTO primero — si lo hay, lo usamos sin buscar fuzzy.
     for (size_t i = 0; i < line.blocks.size(); ++i) {
-        if (normalizeLabel(line.blocks[i].text) == label_norm) {
+        if (normalizeLabel(line.blocks[i].text) == label_norm)
             return static_cast<int>(i);
+    }
+    // Si no hay exacto, buscamos el mejor fuzzy match.
+    int best_idx = -1;
+    int best_d   = max_dist + 1;
+    for (size_t i = 0; i < line.blocks.size(); ++i) {
+        std::string blk = normalizeLabel(line.blocks[i].text);
+        if (blk.empty()) continue;
+        if (std::abs(static_cast<int>(blk.size()) - static_cast<int>(label_norm.size())) > 2) continue;
+        int d = levenshtein(blk, label_norm);
+        if (d <= max_dist && d < best_d) {
+            best_d = d;
+            best_idx = static_cast<int>(i);
         }
     }
-    // Caso 2: secuencia exacta de N bloques
+    if (best_idx >= 0) return best_idx;
+
+    // Caso 2: secuencia exacta de N bloques con tolerancia por token
     for (size_t i = 0; i + toks.size() <= line.blocks.size(); ++i) {
         bool ok = true;
         for (size_t j = 0; j < toks.size(); ++j) {
-            if (normalizeLabel(line.blocks[i + j].text) != normalizeLabel(toks[j])) {
-                ok = false; break;
-            }
+            std::string blk = normalizeLabel(line.blocks[i + j].text);
+            std::string tk  = normalizeLabel(toks[j]);
+            int td = static_cast<int>(tk.size()) >= 5 ? 2 : 1;
+            if (levenshtein(blk, tk) > td) { ok = false; break; }
         }
         if (ok) return static_cast<int>(i + toks.size() - 1);
     }
     // Caso 3: bloques consecutivos cuya concatenacion normalizada
-    // matchea label_norm. Cubre casos donde OCR partio raro.
+    // matchea label_norm fuzzy.
     for (size_t i = 0; i < line.blocks.size(); ++i) {
         std::string acc;
-        for (size_t j = i; j < line.blocks.size() && acc.size() <= label_norm.size(); ++j) {
+        for (size_t j = i; j < line.blocks.size() && acc.size() <= label_norm.size() + max_dist; ++j) {
             acc += normalizeLabel(line.blocks[j].text);
-            if (acc == label_norm) return static_cast<int>(j);
-            if (acc.size() > label_norm.size()) break;
+            if (levenshtein(acc, label_norm) <= max_dist) return static_cast<int>(j);
+            if (acc.size() > label_norm.size() + max_dist) break;
         }
     }
     return -1;
@@ -326,19 +387,25 @@ std::string lastPercentInLine(const Line& line) {
 bool StandardParser::detectStandardTemplate(const std::vector<OCRResult>& ocr_data) {
     auto lines = groupLines(ocr_data);
     int score = 0;
-    // Marcadores de bloque exacto
-    auto hasBlockExact = [&](const std::string& token) {
+    // Marcadores de bloque (con tolerancia Levenshtein para que tolere
+    // OCR garbled de imagenes de baja resolucion).
+    auto hasBlockFuzzy = [&](const std::string& token, int max_dist) {
+        std::string tn = normalizeLabel(token);
         for (const auto& L : lines)
-            for (const auto& b : L.blocks)
-                if (toUpperAscii(b.text) == toUpperAscii(token)) return true;
+            for (const auto& b : L.blocks) {
+                std::string bn = normalizeLabel(b.text);
+                if (bn.empty()) continue;
+                if (std::abs(static_cast<int>(bn.size()) - static_cast<int>(tn.size())) > max_dist + 2) continue;
+                if (levenshtein(bn, tn) <= max_dist) return true;
+            }
         return false;
     };
-    if (hasBlockExact("Cliente:"))   score++;
-    if (hasBlockExact("NIT/CC:"))    score++;
-    if (hasBlockExact("Periodo:"))   score++;
-    if (hasBlockExact("Direccion:")) score++;
-    if (hasBlockExact("Ciudad:"))    score++;
-    if (hasBlockExact("Asesor:"))    score++;
+    if (hasBlockFuzzy("Cliente:",   2)) score++;
+    if (hasBlockFuzzy("NIT/CC:",    2)) score++;
+    if (hasBlockFuzzy("Periodo:",   2)) score++;
+    if (hasBlockFuzzy("Direccion:", 2)) score++;
+    if (hasBlockFuzzy("Ciudad:",    2)) score++;
+    if (hasBlockFuzzy("Asesor:",    2)) score++;
     // Marcadores de seccion (multi-token, busqueda en texto de la linea)
     if (findFirstLine(lines, {"RESUMEN", "PORTAFOLIO"}) >= 0) score++;
     if (findFirstLine(lines, {"RENTA", "FIJA"}) >= 0)         score++;

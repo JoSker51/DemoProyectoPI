@@ -221,17 +221,65 @@ std::vector<OCRResult> OCRExtractor::parseTSV(const std::string& tsv) {
 // =============================================================
 // API publica
 // =============================================================
+// Score de "calidad" de un conjunto de OCRResults. Cuenta caracteres
+// alfanumericos en bloques de longitud >= 3 (descarta ruido tipo "ñ", "%",
+// "AA"). Sirve para comparar resultados de OCR con diferentes PSM y
+// quedarnos con el mejor.
+static int ocrQualityScore(const std::vector<OCRResult>& results) {
+    int score = 0;
+    for (const auto& r : results) {
+        if (r.text.size() < 3) continue;            // bloques muy cortos = ruido
+        int alnum = 0;
+        for (char c : r.text) {
+            if (std::isalnum(static_cast<unsigned char>(c))) alnum++;
+        }
+        // Solo cuenta bloques donde >= 60% es alfanumerico
+        if (alnum * 100 >= static_cast<int>(r.text.size()) * 60) {
+            score += alnum;
+        }
+    }
+    return score;
+}
+
 std::vector<OCRResult> OCRExtractor::extractAll(const cv::Mat& image) {
     if (!available_ && !startServer()) return {};
     std::cout << "[OCRExtractor] Tesseract sobre imagen "
               << image.cols << "x" << image.rows << "..." << std::endl;
     std::string path = saveTempImage(image, "full");
-    std::string tsv  = runTesseractTSV(path);
+
+    // Para imagenes posiblemente difíciles (low-res, blurry, screenshots
+    // con moiré) probamos varios Page Segmentation Modes y nos quedamos
+    // con el resultado mas "coherente" (mas chars alfanumericos en bloques
+    // de longitud razonable). Cada PSM enfoca distinto:
+    //   PSM 6  = single uniform block (default, OK para PDFs limpios)
+    //   PSM 4  = single column of variable-size text (mejor para tablas)
+    //   PSM 11 = sparse text find as much text as possible
+    int saved_psm = psm_;
+    std::vector<int> psms_to_try = {6, 4, 11};
+
+    std::vector<OCRResult> best;
+    int best_score = -1;
+    int best_psm = saved_psm;
+    for (int psm : psms_to_try) {
+        psm_ = psm;
+        std::string tsv = runTesseractTSV(path);
+        auto results = parseTSV(tsv);
+        int score = ocrQualityScore(results);
+        std::cout << "[OCRExtractor]   PSM " << psm << ": "
+                  << results.size() << " lineas, score=" << score << "\n";
+        if (score > best_score) {
+            best_score = score;
+            best       = std::move(results);
+            best_psm   = psm;
+        }
+    }
+    psm_ = saved_psm;
     fs::remove(path);
-    auto results = parseTSV(tsv);
-    std::cout << "[OCRExtractor] " << results.size()
-              << " lineas de texto extraidas." << std::endl;
-    return results;
+
+    std::cout << "[OCRExtractor] Mejor resultado: PSM " << best_psm
+              << " con " << best.size() << " lineas (score=" << best_score
+              << ")\n";
+    return best;
 }
 
 std::vector<OCRResult> OCRExtractor::extractFromRegion(const cv::Mat& region) {

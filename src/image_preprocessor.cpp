@@ -503,9 +503,12 @@ cv::Mat ImagePreprocessor::enhanceForOCR(const cv::Mat& input, PreprocessReport*
     saveStage(denoised, "step_denoised");
     r.steps_applied.push_back("median_blur");
 
-    // --- Upscale si la imagen es chica, con cap para evitar monstruos ---
-    int min_side_target = 1500;
-    int min_side = std::min(denoised.cols, denoised.rows);
+    // --- Pipeline adaptativo: para imagenes chicas, upscaling mas agresivo ---
+    // Imagenes razonables (min_side >= 1500): target 1500 (conservador).
+    // Imagenes chicas (min_side < 1500): target 2500 para ayudar al OCR.
+    int pre_min_side = std::min(denoised.cols, denoised.rows);
+    int min_side_target = (pre_min_side < 1500) ? 2500 : 1500;
+    int min_side = pre_min_side;
     int max_side = std::max(denoised.cols, denoised.rows);
     if (min_side < min_side_target) {
         double scale = static_cast<double>(min_side_target) / min_side;
@@ -536,6 +539,19 @@ cv::Mat ImagePreprocessor::enhanceForOCR(const cv::Mat& input, PreprocessReport*
         denoised = shrunk;
         saveStage(denoised, "step_downscaled");
         r.steps_applied.push_back("downscaled_x" + std::to_string(scale));
+    }
+
+    // --- Binarizacion Sauvola SOLO para imagenes pequenas/dificiles ---
+    // En imagenes grandes y limpias (PDFs renderizados a 300 DPI),
+    // Tesseract funciona mejor con grayscale (preserva anti-aliasing).
+    // Para imagenes pequenas o con artefactos (screenshots, fotos), Sauvola
+    // ayuda a separar texto del fondo. Threshold: si la fuente era chica,
+    // binarizamos.
+    if (pre_min_side < 1500) {
+        cv::Mat binary = sauvolaBinarize(denoised, 25, 0.2);
+        saveStage(binary, "step_binary");
+        r.steps_applied.push_back("sauvola_binarize");
+        denoised = binary;
     }
 
     r.final_width  = denoised.cols;
