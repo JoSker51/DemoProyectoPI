@@ -516,10 +516,17 @@ cv::Mat ImagePreprocessor::enhanceForOCR(const cv::Mat& input, PreprocessReport*
         }
         if (scale > 1.01) {
             cv::Mat upscaled;
-            cv::resize(denoised, upscaled, cv::Size(), scale, scale, cv::INTER_CUBIC);
-            denoised = upscaled;
+            // Lanczos preserva mejor los bordes del texto que cubic.
+            cv::resize(denoised, upscaled, cv::Size(), scale, scale, cv::INTER_LANCZOS4);
+            // Tras un upscale fuerte, los bordes del texto quedan suaves.
+            // Aplicamos unsharp mask para recuperar nitidez (esto es
+            // critico para que Tesseract pueda leer el texto upscaled).
+            cv::Mat blurred, sharpened;
+            cv::GaussianBlur(upscaled, blurred, cv::Size(0, 0), 1.0);
+            cv::addWeighted(upscaled, 1.6, blurred, -0.6, 0, sharpened);
+            denoised = sharpened;
             saveStage(denoised, "step_upscaled");
-            r.steps_applied.push_back("upscaled_x" + std::to_string(scale));
+            r.steps_applied.push_back("upscaled_lanczos_x" + std::to_string(scale));
         }
     } else if (max_side > max_dim_) {
         // Imagen ya muy grande: bajarla a max_dim_ por el lado largo
