@@ -140,14 +140,31 @@ std::vector<std::string> splitTokens(const std::string& s) {
     return out;
 }
 
-// True si el texto del bloque coincide exactamente con el primer token
-// (en mayusculas) de algun KNOWN_LABEL. Sirve para "frenar" el textAfterLabel
-// cuando topa con el inicio de otro label.
+// Normaliza: mayusculas + sin espacios. Asi "Saldo Anterior:" se vuelve
+// "SALDOANTERIOR:" igual que si los tokens estuvieran concatenados.
+std::string normalizeLabel(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        if (c == ' ' || c == '\t') continue;
+        out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
+// True si el bloque parece ser el comienzo (o el todo) de algun KNOWN_LABEL.
+// Sirve para "frenar" textAfterLabel cuando topa con el inicio de otro label.
+// Acepta:
+//   - Coincidencia exacta del primer token (ej. "Saldo")
+//   - El bloque completo (normalizado) es el label completo (ej.
+//     "Saldo Anterior:" o "SaldoAnterior:" → "SALDOANTERIOR:")
 bool blockStartsKnownLabel(const std::string& blocktext) {
-    std::string up = toUpperAscii(blocktext);
+    std::string up   = toUpperAscii(blocktext);
+    std::string norm = normalizeLabel(blocktext);
+    if (norm.empty()) return false;
     for (const auto& L : KNOWN_LABELS) {
         auto toks = splitTokens(L);
         if (!toks.empty() && toUpperAscii(toks.front()) == up) return true;
+        if (normalizeLabel(L) == norm) return true;
     }
     return false;
 }
@@ -157,18 +174,17 @@ bool blockStartsKnownLabel(const std::string& blocktext) {
 //
 // Robusto a fragmentacion OCR: tambien acepta que el label venga
 // CONCATENADO en un solo bloque (ej. "SaldoAnterior:") o con tokens
-// pegados sin espacio (ej. "Saldo" + "Anterior:" pero el ":" en el
-// segundo). Para multi-palabra, se acepta si la concatenacion sin
-// espacios de N bloques consecutivos matchea el label sin espacios.
+// pegados sin espacio. La normalizacion (sin espacios) hace que
+// "Saldo Anterior:" como un solo bloque tambien matchee.
 int findLabelEnd(const Line& line, const std::string& label) {
     auto toks = splitTokens(label);
     if (toks.empty()) return -1;
-    std::string label_join_up;
-    for (const auto& t : toks) label_join_up += toUpperAscii(t);
+    std::string label_norm = normalizeLabel(label);
 
-    // Caso 1: label en un solo bloque (concatenado)
+    // Caso 1: label en un solo bloque (con espacios internos o no)
+    // Ejemplo: bloque "Saldo Anterior:" o "SaldoAnterior:" ambos matchean.
     for (size_t i = 0; i < line.blocks.size(); ++i) {
-        if (toUpperAscii(line.blocks[i].text) == label_join_up) {
+        if (normalizeLabel(line.blocks[i].text) == label_norm) {
             return static_cast<int>(i);
         }
     }
@@ -176,20 +192,20 @@ int findLabelEnd(const Line& line, const std::string& label) {
     for (size_t i = 0; i + toks.size() <= line.blocks.size(); ++i) {
         bool ok = true;
         for (size_t j = 0; j < toks.size(); ++j) {
-            if (toUpperAscii(line.blocks[i + j].text) != toUpperAscii(toks[j])) {
+            if (normalizeLabel(line.blocks[i + j].text) != normalizeLabel(toks[j])) {
                 ok = false; break;
             }
         }
         if (ok) return static_cast<int>(i + toks.size() - 1);
     }
-    // Caso 3: bloques consecutivos cuya concatenacion (sin espacios)
-    // matchea label_join_up. Cubre casos donde OCR partio raro.
+    // Caso 3: bloques consecutivos cuya concatenacion normalizada
+    // matchea label_norm. Cubre casos donde OCR partio raro.
     for (size_t i = 0; i < line.blocks.size(); ++i) {
         std::string acc;
-        for (size_t j = i; j < line.blocks.size() && acc.size() <= label_join_up.size(); ++j) {
-            acc += toUpperAscii(line.blocks[j].text);
-            if (acc == label_join_up) return static_cast<int>(j);
-            if (acc.size() > label_join_up.size()) break;
+        for (size_t j = i; j < line.blocks.size() && acc.size() <= label_norm.size(); ++j) {
+            acc += normalizeLabel(line.blocks[j].text);
+            if (acc == label_norm) return static_cast<int>(j);
+            if (acc.size() > label_norm.size()) break;
         }
     }
     return -1;
@@ -228,14 +244,25 @@ std::string toISODate(const std::string& s) {
 // solo numero gigante (resultaria 1.75e18). El parser legacy hace
 // "strip de puntos" y luego stod, que es vulnerable a esa concatenacion.
 double parseCOPNumber(const std::string& text) {
+    // Normalizar: Tesseract a veces lee "." como " " dentro de un numero
+    // grande (ej. "32.067 000,00" o "1.846.624 461,02"). Convertimos
+    // espacios entre digitos en puntos antes de intentar el regex.
+    std::string norm = text;
+    static const std::regex re_space_between_digits(R"((\d) +(\d))");
+    // Aplicar varias veces para colapsar grupos como "X X X X" -> "X.X.X.X"
+    for (int pass = 0; pass < 4; ++pass) {
+        std::string after = std::regex_replace(norm, re_space_between_digits, "$1.$2");
+        if (after == norm) break;
+        norm = after;
+    }
     static const std::regex re_first(R"((-?[\d\.]+,\d{1,2}))");
     std::smatch m;
-    if (std::regex_search(text, m, re_first)) {
+    if (std::regex_search(norm, m, re_first)) {
         return DataStructurer::parseColombianNumber(m.str());
     }
     // Fallback: numero entero sin decimales ("$1.000.000")
     static const std::regex re_int(R"((-?\d{1,3}(?:\.\d{3})+))");
-    if (std::regex_search(text, m, re_int)) {
+    if (std::regex_search(norm, m, re_int)) {
         return DataStructurer::parseColombianNumber(m.str());
     }
     return 0.0;
@@ -631,12 +658,16 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
     // =========================================================================
     if (idx_saldos >= 0) {
         int end = next_section_after(idx_saldos);
-        // Buscar header con "Cuenta", "Banco", "Saldo"
+        // Buscar header con al menos "Cuenta" o "Saldo" (Banco a veces
+        // sale ilegible en fotos: lo deja como "AA" o vacio, no exigible).
         int idx_header = -1;
         for (int i = idx_saldos + 1; i < end; ++i) {
             std::string up = toUpperAscii(lines[i].text());
-            if (up.find("CUENTA") != std::string::npos &&
-                up.find("BANCO")  != std::string::npos) { idx_header = i; break; }
+            if (up.find("CUENTA") != std::string::npos ||
+                (up.find("SALDO") != std::string::npos &&
+                 up.find("BANCO") != std::string::npos)) {
+                idx_header = i; break;
+            }
         }
         if (idx_header >= 0) {
             for (int i = idx_header + 1; i < end; ++i) {
