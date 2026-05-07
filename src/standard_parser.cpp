@@ -324,16 +324,49 @@ double parseCOPNumber(const std::string& text) {
     // espacios entre digitos en puntos antes de intentar el regex.
     std::string norm = text;
     static const std::regex re_space_between_digits(R"((\d) +(\d))");
-    // Aplicar varias veces para colapsar grupos como "X X X X" -> "X.X.X.X"
     for (int pass = 0; pass < 4; ++pass) {
         std::string after = std::regex_replace(norm, re_space_between_digits, "$1.$2");
         if (after == norm) break;
         norm = after;
     }
-    static const std::regex re_first(R"((-?[\d\.]+,\d{1,2}))");
+    // Buscar el primer numero. Acepta coma o punto como separador decimal
+    // (el OCR a veces lee la coma decimal como punto: "$3.728.754.322.65"
+    // en vez de "$3.728.754.322,65").
+    static const std::regex re_first(R"((-?[\d\.,]+[,.]\d{1,2}))");
     std::smatch m;
     if (std::regex_search(norm, m, re_first)) {
-        return DataStructurer::parseColombianNumber(m.str());
+        std::string s = m.str();
+        // Quitar $ y espacios
+        std::string clean;
+        for (char c : s) if (c != '$' && c != ' ' && c != '\t') clean += c;
+        // Encontrar el ultimo separador (`,` o `.`) — ese es el decimal.
+        // Los demas son separadores de miles. Stripeamos todos excepto el
+        // ultimo, y lo convertimos a punto para std::stod.
+        size_t decimal_pos = std::string::npos;
+        for (size_t i = clean.size(); i-- > 0;) {
+            if (clean[i] == '.' || clean[i] == ',') {
+                // Solo si despues hay 1 o 2 digitos (es decimal valido)
+                if (clean.size() - i - 1 >= 1 && clean.size() - i - 1 <= 2) {
+                    bool all_digits = true;
+                    for (size_t j = i + 1; j < clean.size(); ++j) {
+                        if (!std::isdigit(static_cast<unsigned char>(clean[j]))) {
+                            all_digits = false; break;
+                        }
+                    }
+                    if (all_digits) { decimal_pos = i; break; }
+                }
+            }
+        }
+        if (decimal_pos != std::string::npos) {
+            std::string result;
+            for (size_t i = 0; i < clean.size(); ++i) {
+                if (i == decimal_pos) result += '.';
+                else if (clean[i] == '.' || clean[i] == ',') continue;
+                else result += clean[i];
+            }
+            try { return std::stod(result); } catch (...) { /* fallthrough */ }
+        }
+        return DataStructurer::parseColombianNumber(s);
     }
     // Fallback: numero entero sin decimales ("$1.000.000")
     static const std::regex re_int(R"((-?\d{1,3}(?:\.\d{3})+))");
@@ -354,8 +387,10 @@ double parseCOPPercent(const std::string& text) {
 
 // Devuelve el "money-like" string en la linea, requiriendo signo $ para
 // distinguir de porcentajes. Toma el primero (mas a la izquierda).
+// Acepta tanto coma como punto como separador decimal porque el OCR
+// a veces confunde uno con otro.
 std::string lastMoneyInLine(const Line& line) {
-    static const std::regex re(R"(\$\s*[\d\.]+,\d{2})");
+    static const std::regex re(R"(\$\s*[\d\.\,]+[,.]\d{2})");
     for (const auto& b : line.blocks) {
         std::smatch m;
         std::string t = b.text;
@@ -509,16 +544,28 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
             std::string up = toUpperAscii(txt);
             std::string money = lastMoneyInLine(lines[i]);
             double v = parseCOPNumber(money);
-            if (up.find("RENTA FIJA") != std::string::npos) {
-                out.resumen.activos["Renta Fija"] = v;
-            } else if (up.find("FONDOS") != std::string::npos ||
-                       up.find("FIC") != std::string::npos) {
-                out.resumen.activos["FIC"] = v;
-            } else if (up.find("EFECTIVO") != std::string::npos) {
-                out.resumen.activos["Saldos en Efectivo"] = v;
-            } else if (up.find("TOTAL") != std::string::npos) {
+            // Matching fuzzy de los labels para tolerar OCR garbled
+            // (ej. "RENTA FIJA" leido como "RETA FA" o "RENIA FIJA").
+            // fuzzyContains acepta tolerancia Levenshtein proporcional
+            // al tamano de la palabra.
+            bool is_renta = fuzzyContains(up, "RENTA", 1) &&
+                             fuzzyContains(up, "FIJA", 1);
+            bool is_fic   = fuzzyContains(up, "FONDOS", 1) ||
+                             fuzzyContains(up, "FIC", 0);
+            bool is_efe   = fuzzyContains(up, "EFECTIVO", 2) ||
+                             fuzzyContains(up, "SALDOS", 1);
+            bool is_total = fuzzyContains(up, "TOTAL", 1);
+            // Prioridad: TOTAL antes que renta/fic/efe (la fila de TOTAL
+            // tambien podria contener "Renta" si el formato cambia).
+            if (is_total) {
                 out.resumen.total_portafolio = v;
                 out.resumen.total_activos    = v;
+            } else if (is_renta) {
+                out.resumen.activos["Renta Fija"] = v;
+            } else if (is_fic) {
+                out.resumen.activos["FIC"] = v;
+            } else if (is_efe) {
+                out.resumen.activos["Saldos en Efectivo"] = v;
             }
         }
     }
@@ -566,10 +613,11 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
             //   nemo | F.Emi | F.Vto | F.Cmp | T.Facial | Period |
             //   Vlr.Nominal | T.Negoc | T.Valor | Vlr.Mercado
             // Date: acepta DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY o DD MM YYYY
-            // (OCR a veces lee guiones como espacios o puntos).
             static const std::regex re_date(R"(\d{1,2}[-./ ]\d{1,2}[-./ ]\d{4})");
-            static const std::regex re_percent(R"([\d\.]+,\d{1,2}\s*%)");
-            static const std::regex re_money(R"(\$\s*[\d\.]+,\d{2})");
+            // Percent: acepta coma o punto como decimal
+            static const std::regex re_percent(R"([\d\.]+[,.]\d{1,2}\s*%)");
+            // Money: acepta coma o punto como decimal (OCR a veces confunde)
+            static const std::regex re_money(R"(\$\s*[\d\.\,]+[,.]\d{2})");
 
             // Helpers para extraer todas las ocurrencias de un patron en
             // un texto. Las regex se aplican al TEXTO COMPLETO de la fila
