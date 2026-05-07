@@ -132,13 +132,14 @@ bool GraphGenerator::drawRegressionLine(cv::Mat& img, const cv::Rect& plot,
 // =============================================================
 std::string GraphGenerator::generateYieldCurve(
     const std::vector<InstrumentoRentaFija>& cdts,
+    const std::string& reference_date,
     const std::string& output_path) {
 
     std::cout << "[GraphGenerator] 1. Yield Curve...\n";
     int W = 900, H = 600;
     cv::Mat img(H, W, CV_8UC3, cv::Scalar(255, 255, 255));
     drawTitle(img, "Yield Curve - Tasa de Valoracion vs Vencimiento");
-    drawSubtitle(img, "Cada CDT como punto. Linea roja: tendencia (regresion lineal).");
+    drawSubtitle(img, "Solo instrumentos VIVOS. Linea roja: tendencia (regresion lineal).");
 
     if (cdts.empty()) {
         drawLabel(img, "(Sin datos de renta fija)", 50, H / 2, 0.7, cv::Scalar(120, 120, 120));
@@ -146,41 +147,55 @@ std::string GraphGenerator::generateYieldCurve(
         return output_path;
     }
 
-    // Calcular dias a vencimiento. Si fechas vacias -> X = indice
-    std::vector<cv::Point2d> data;
-    auto today_t = std::time(nullptr);
-    std::tm tn_struct = *std::localtime(&today_t);
-    auto days_to = [&](const std::string& iso) -> int {
-        if (iso.size() < 10) return -1;
+    // Resolver fecha de referencia: extracto si esta presente, sino HOY.
+    auto parseISO = [](const std::string& iso) -> std::time_t {
+        if (iso.size() < 10) return 0;
         std::tm tm = {};
         try {
             tm.tm_year = std::stoi(iso.substr(0, 4)) - 1900;
             tm.tm_mon  = std::stoi(iso.substr(5, 2)) - 1;
             tm.tm_mday = std::stoi(iso.substr(8, 2));
-        } catch (...) { return -1; }
-        std::time_t t = std::mktime(&tm);
-        std::tm tn_local = tn_struct;
-        std::time_t now = std::mktime(&tn_local);
-        return static_cast<int>(std::difftime(t, now) / 86400);
+        } catch (...) { return 0; }
+        return std::mktime(&tm);
+    };
+    std::time_t ref_t = parseISO(reference_date);
+    if (ref_t == 0) ref_t = std::time(nullptr);
+    auto days_to = [&](const std::string& iso) -> int {
+        std::time_t t = parseISO(iso);
+        if (t == 0) return -1;
+        return static_cast<int>(std::difftime(t, ref_t) / 86400);
     };
 
-    bool dates_degenerate = true;
+    // Filtrar: solo instrumentos VIVOS (vto > fecha_referencia). Los
+    // expirados se cuentan aparte para reportarlos como nota.
+    std::vector<cv::Point2d> data;
+    std::vector<size_t>      data_to_orig_idx;
+    int n_expired = 0;
     for (size_t i = 0; i < cdts.size(); ++i) {
         int d = days_to(cdts[i].fecha_vencimiento);
-        if (d < 0) d = static_cast<int>(i + 1) * 90;  // fallback escalonado
+        if (d <= 0) { n_expired++; continue; }   // EXPIRADO -> excluir
         data.emplace_back(static_cast<double>(d), cdts[i].tasa_valoracion);
+        data_to_orig_idx.push_back(i);
     }
+
+    if (data.empty()) {
+        drawLabel(img,
+                   "(Todos los instrumentos estan vencidos al " +
+                   (reference_date.empty() ? std::string("hoy") : reference_date) + ")",
+                   50, H / 2, 0.6, cv::Scalar(120, 120, 120));
+        cv::imwrite(output_path, img);
+        return output_path;
+    }
+    bool dates_degenerate = false;
     // Si todas las X son iguales (datos degenerados), espaciarlas artificialmente
     {
         double mn = data.front().x, mx = data.front().x;
         for (auto& p : data) { mn = std::min(mn, p.x); mx = std::max(mx, p.x); }
         if (mx - mn < 1.0) {
-            // espaciar uniformemente, mantener un texto base
+            dates_degenerate = true;
             double base = mn;
             for (size_t i = 0; i < data.size(); ++i)
-                data[i].x = base + i * 30;  // 30 dias de separacion artificial
-        } else {
-            dates_degenerate = false;
+                data[i].x = base + i * 30;
         }
     }
 
@@ -251,13 +266,21 @@ std::string GraphGenerator::generateYieldCurve(
     }
 
     for (size_t i = 0; i < data.size(); ++i) {
+        size_t orig = data_to_orig_idx[i];
+        const std::string& lbl = labels[orig];
         cv::Point pt(map_x(data[i].x), map_y(data[i].y));
-        cv::circle(img, pt, 9, palette[i % palette.size()], cv::FILLED, cv::LINE_AA);
+        cv::circle(img, pt, 9, palette[orig % palette.size()], cv::FILLED, cv::LINE_AA);
         cv::circle(img, pt, 9, cv::Scalar(40, 40, 40), 1, cv::LINE_AA);
-        // Etiqueta arriba del punto, no a la derecha (evita overlap)
-        cv::Size lblSz = cv::getTextSize(labels[i], cv::FONT_HERSHEY_SIMPLEX, 0.42, 1, nullptr);
-        drawLabel(img, labels[i], pt.x - lblSz.width / 2, pt.y - 14, 0.42,
+        cv::Size lblSz = cv::getTextSize(lbl, cv::FONT_HERSHEY_SIMPLEX, 0.42, 1, nullptr);
+        drawLabel(img, lbl, pt.x - lblSz.width / 2, pt.y - 14, 0.42,
                   cv::Scalar(60, 60, 60));
+    }
+    // Nota al pie con expirados (debajo de la regresion para no chocar)
+    if (n_expired > 0) {
+        std::ostringstream nx;
+        nx << "Nota: " << n_expired << " instrumento(s) expirado(s) "
+              "excluido(s) (vto <= " << reference_date << ")";
+        drawLabel(img, nx.str(), 60, H - 10, 0.42, cv::Scalar(120, 120, 120));
     }
 
     // Footer: en una linea, lejos del label "Dias a vencimiento"
@@ -269,7 +292,8 @@ std::string GraphGenerator::generateYieldCurve(
     } else {
         oss << "(Datos insuficientes para regresion: fechas iguales o faltantes)";
     }
-    drawLabel(img, oss.str(), 60, H - 12, 0.45,
+    // Footer: regresion arriba, nota de expirados debajo (sin overlap)
+    drawLabel(img, oss.str(), 60, H - 30, 0.45,
               reg_ok ? cv::Scalar(60, 76, 231) : cv::Scalar(120, 120, 120), 1);
 
     cv::imwrite(output_path, img);
@@ -845,7 +869,8 @@ std::vector<std::string> GraphGenerator::generateAll(
     std::vector<std::string> paths;
 
     paths.push_back(generateYieldCurve(
-        extracto.renta_fija,           output_dir + "/01_yield_curve.png"));
+        extracto.renta_fija, extracto.resumen.fecha_extracto,
+        output_dir + "/01_yield_curve.png"));
     paths.push_back(generateMaturityLadder(
         analysis.avanzadas,            output_dir + "/02_maturity_ladder.png"));
     paths.push_back(generateParetoConcentracion(

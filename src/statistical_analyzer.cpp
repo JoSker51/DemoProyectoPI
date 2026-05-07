@@ -454,20 +454,38 @@ AdvancedMetrics StatisticalAnalyzer::computeAdvanced(
     // wᵢ = market_value / total_RF
     // Macaulay = Σ wᵢ × tᵢ
     // Modificada = Macaulay / (1 + yield)
-    if (total_rf > 0) {
+    // Para los calculos basados en "dias hasta el vencimiento" usamos como
+    // referencia la FECHA DEL EXTRACTO (no la fecha actual del sistema).
+    // Eso es lo correcto: el inversionista ve el extracto en su fecha y los
+    // dias deben calcularse desde ese punto en el tiempo. Si el extracto no
+    // tiene fecha, caemos a hoy como fallback.
+    auto today = [&]() -> std::string {
+        if (!extracto.resumen.fecha_extracto.empty())
+            return extracto.resumen.fecha_extracto;
         std::time_t now = std::time(nullptr);
         std::tm* tm_now = std::localtime(&now);
-        char today_buf[11];
-        std::strftime(today_buf, sizeof(today_buf), "%Y-%m-%d", tm_now);
-        std::string today = today_buf;
+        char buf[11];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d", tm_now);
+        return std::string(buf);
+    }();
 
+    if (total_rf > 0) {
         double mac = 0.0;
+        double total_no_expired = 0.0;
+        // Macaulay: solo con instrumentos VIVOS (vencimiento > extracto).
         for (const auto& cdt : extracto.renta_fija) {
             int dias = diasEntreFechasISO(today, cdt.fecha_vencimiento);
-            if (dias < 0) dias = 0;
-            double t  = dias / 365.0;
-            double w  = cdt.valor_mercado / total_rf;
-            mac += w * t;
+            if (dias <= 0) continue;            // expirado: no contribuye
+            total_no_expired += cdt.valor_mercado;
+        }
+        if (total_no_expired > 0) {
+            for (const auto& cdt : extracto.renta_fija) {
+                int dias = diasEntreFechasISO(today, cdt.fecha_vencimiento);
+                if (dias <= 0) continue;
+                double t = dias / 365.0;
+                double w = cdt.valor_mercado / total_no_expired;
+                mac += w * t;
+            }
         }
         m.duracion_macaulay_anos = mac;
         double y = m.yield_ponderado_pct / 100.0;
@@ -506,31 +524,35 @@ AdvancedMetrics StatisticalAnalyzer::computeAdvanced(
     }
 
     // ---------- 4. Vencimientos por bucket ----------
-    std::time_t now = std::time(nullptr);
-    std::tm* tm_now = std::localtime(&now);
-    char today_buf[11];
-    std::strftime(today_buf, sizeof(today_buf), "%Y-%m-%d", tm_now);
-    std::string today = today_buf;
-
+    // Usa la misma fecha de referencia (fecha_extracto) ya calculada arriba.
+    // Los expirados van a un bucket "Vencidos" propio para que el usuario
+    // los vea aparte (no inflar el bucket <90d con instrumentos ya
+    // vencidos y dias=0 — eso oculta el problema real).
     auto label_for = [&](int dias) -> std::string {
-        if (dias < cfg.dias_corto)  return "<" + std::to_string(cfg.dias_corto) + "d";
-        if (dias < cfg.dias_medio)  return std::to_string(cfg.dias_corto) + "-" +
+        if (dias <= 0)               return "Vencidos";
+        if (dias < cfg.dias_corto)   return "<" + std::to_string(cfg.dias_corto) + "d";
+        if (dias < cfg.dias_medio)   return std::to_string(cfg.dias_corto) + "-" +
                                             std::to_string(cfg.dias_medio) + "d";
-        if (dias < cfg.dias_largo)  return std::to_string(cfg.dias_medio) + "d-" +
+        if (dias < cfg.dias_largo)   return std::to_string(cfg.dias_medio) + "d-" +
                                             std::to_string(cfg.dias_largo / 365) + "a";
         return ">" + std::to_string(cfg.dias_largo / 365) + "a";
     };
 
     double weighted_dias = 0.0;
+    double total_no_expired = 0.0;
     for (const auto& cdt : extracto.renta_fija) {
         int dias = diasEntreFechasISO(today, cdt.fecha_vencimiento);
-        if (dias < 0) dias = 0;
         std::string b = label_for(dias);
         m.vencimientos_buckets[b] += cdt.valor_mercado;
         m.vencimientos_count[b]   += 1;
-        if (total_rf > 0) weighted_dias += (cdt.valor_mercado / total_rf) * dias;
+        if (dias > 0) {
+            total_no_expired += cdt.valor_mercado;
+            weighted_dias += cdt.valor_mercado * dias;
+        }
     }
-    m.dias_promedio_vencimiento = weighted_dias;
+    // dias_promedio: ponderado solo sobre instrumentos vivos (sin expirados)
+    m.dias_promedio_vencimiento = total_no_expired > 0 ?
+                                    weighted_dias / total_no_expired : 0.0;
 
     // ---------- 5. FIC: Sharpe y rentabilidad ----------
     if (!extracto.fondos.empty()) {

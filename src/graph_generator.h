@@ -25,8 +25,13 @@ public:
 
     // 1. Yield Curve: tasa de valoracion vs dias a vencimiento.
     //    Cada CDT es un punto. Linea de regresion lineal opcional.
+    //    `reference_date` (ISO YYYY-MM-DD) define desde donde se cuentan
+    //    los dias al vencimiento. Si esta vacio, usa hoy como fallback.
+    //    Los instrumentos ya vencidos (vto <= ref) se excluyen del scatter
+    //    y se reportan en una nota debajo de la grafica.
     std::string generateYieldCurve(
         const std::vector<InstrumentoRentaFija>& cdts,
+        const std::string& reference_date,
         const std::string& output_path);
 
     // 2. Maturity Ladder: monto $ en cada bucket de vencimiento.
