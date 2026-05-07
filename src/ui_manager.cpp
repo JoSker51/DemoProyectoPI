@@ -778,19 +778,30 @@ void MainFrame::updateResumenDisplay(const ExtractoCompleto& extracto) {
         row++;
     };
 
-    setRow("Fecha Extracto", r.fecha_extracto);
-    setRow("Nombre Cliente", r.nombre_cliente);
-    setRow("NIT", r.nit);
-    setRow("Direccion", r.direccion);
-    setRow("Ciudad", r.ciudad);
-    setRow("Telefono", r.telefono);
-    setRow("Asesor", r.asesor);
+    // Solo mostramos los campos que tienen valor (los del template v1
+    // no incluyen Telefono, asi que evitamos mostrar filas vacias).
+    auto setIfNonEmpty = [&](const std::string& campo, const std::string& valor) {
+        if (!valor.empty()) setRow(campo, valor);
+    };
+    setIfNonEmpty("Fecha Extracto", r.fecha_extracto);
+    setIfNonEmpty("Nombre Cliente", r.nombre_cliente);
+    setIfNonEmpty("NIT",            r.nit);
+    setIfNonEmpty("Direccion",      r.direccion);
+    setIfNonEmpty("Ciudad",         r.ciudad);
+    setIfNonEmpty("Telefono",       r.telefono);
+    setIfNonEmpty("Asesor",         r.asesor);
 
     for (const auto& [key, val] : r.activos) {
         setRow(key, formatCOPMoney(val));
     }
-    setRow("Total Activos",    formatCOPMoney(r.total_activos));
-    setRow("Total Pasivos",    formatCOPMoney(r.total_pasivos));
+    // En un extracto de inversion no hay pasivos (no es un balance
+    // contable), solo activos. Mostramos "Total Activos" y el total
+    // del portafolio. "Total Pasivos" solo se muestra si > 0
+    // (caso teorico: cuenta margin con prestamo).
+    setRow("Total Activos", formatCOPMoney(r.total_activos));
+    if (r.total_pasivos > 0.0) {
+        setRow("Total Pasivos", formatCOPMoney(r.total_pasivos));
+    }
     setRow("TOTAL PORTAFOLIO", formatCOPMoney(r.total_portafolio));
 
     grid_resumen_->AutoSize();
