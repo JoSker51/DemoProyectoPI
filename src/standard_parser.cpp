@@ -640,17 +640,54 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
                 if (row.blocks.empty()) continue;
                 std::string text_full = row.text();
 
-                // Pre-procesar: Tesseract fragmenta numeros con espacios
-                // (ej. "1.355 271 000,00" en vez de "1.355.271.000,00").
-                // Colapsamos espacios entre digitos como puntos para que
-                // los regex agarren los valores completos.
-                std::string text_norm = text_full;
+                // Pre-procesar para reconstruir numeros que el OCR
+                // fragmento con espacios. Reglas:
+                // 1) Espacios DENTRO de un mismo bloque entre digitos:
+                //    siempre se colapsan (ej. "1.355 271 000,00" del
+                //    OCR es "1.355.271.000,00").
+                // 2) Espacios ENTRE bloques distintos: solo se colapsan
+                //    si los lados parecen formar un numero plausible
+                //    (ej. bloque "$" + bloque "1.234.567,89" = una
+                //    cifra; pero NO "2024" + "7,48%" que son una fecha
+                //    seguida de un porcentaje).
+                //    Heuristica: colapsar solo si el bloque previo
+                //    termina en '$' o si NO contiene fechas/letras.
                 static const std::regex re_space_between_digits(R"((\d) +(\d))");
-                for (int pass = 0; pass < 4; ++pass) {
-                    std::string after = std::regex_replace(text_norm,
-                                                            re_space_between_digits, "$1.$2");
-                    if (after == text_norm) break;
-                    text_norm = after;
+                static const std::regex re_has_date(R"(\d{1,2}-\d{1,2}-\d{4})");
+                static const std::regex re_has_letters(R"([A-Za-z])");
+                auto normSpaces = [&](std::string s) {
+                    for (int pass = 0; pass < 4; ++pass) {
+                        std::string after = std::regex_replace(s,
+                                                                re_space_between_digits, "$1.$2");
+                        if (after == s) break;
+                        s = after;
+                    }
+                    return s;
+                };
+                std::string text_norm;
+                for (size_t bi = 0; bi < row.blocks.size(); ++bi) {
+                    std::string blk = normSpaces(row.blocks[bi].text);
+                    if (!text_norm.empty()) {
+                        // ¿Conviene fusionar este bloque con el anterior?
+                        // Si el anterior termina en '$' o coma decimal,
+                        // o si el actual empieza con digito y el anterior
+                        // ES un numero "puro" (sin letras ni fecha).
+                        bool prev_ends_dollar = !text_norm.empty() &&
+                                                 text_norm.back() == '$';
+                        bool curr_starts_digit = !blk.empty() &&
+                                                  std::isdigit(static_cast<unsigned char>(blk.front()));
+                        bool prev_is_pure_num = !std::regex_search(text_norm, re_has_date) &&
+                                                 !std::regex_search(text_norm, re_has_letters);
+                        // Solo unir sin espacio si previo termina en $
+                        // (caso "$" + numero). En otros casos, espacio normal.
+                        if (prev_ends_dollar && curr_starts_digit) {
+                            // sin espacio entre $ y el numero
+                        } else {
+                            text_norm += " ";
+                        }
+                        (void)prev_is_pure_num;
+                    }
+                    text_norm += blk;
                 }
 
                 // Extraer todas las fechas, porcentajes, dineros del texto normalizado.
