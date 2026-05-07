@@ -154,9 +154,25 @@ bool blockStartsKnownLabel(const std::string& blocktext) {
 
 // Busca una secuencia de bloques que matchee los tokens de label (case-
 // insensitive). Devuelve el indice del ULTIMO bloque del label, o -1.
+//
+// Robusto a fragmentacion OCR: tambien acepta que el label venga
+// CONCATENADO en un solo bloque (ej. "SaldoAnterior:") o con tokens
+// pegados sin espacio (ej. "Saldo" + "Anterior:" pero el ":" en el
+// segundo). Para multi-palabra, se acepta si la concatenacion sin
+// espacios de N bloques consecutivos matchea el label sin espacios.
 int findLabelEnd(const Line& line, const std::string& label) {
     auto toks = splitTokens(label);
     if (toks.empty()) return -1;
+    std::string label_join_up;
+    for (const auto& t : toks) label_join_up += toUpperAscii(t);
+
+    // Caso 1: label en un solo bloque (concatenado)
+    for (size_t i = 0; i < line.blocks.size(); ++i) {
+        if (toUpperAscii(line.blocks[i].text) == label_join_up) {
+            return static_cast<int>(i);
+        }
+    }
+    // Caso 2: secuencia exacta de N bloques
     for (size_t i = 0; i + toks.size() <= line.blocks.size(); ++i) {
         bool ok = true;
         for (size_t j = 0; j < toks.size(); ++j) {
@@ -165,6 +181,16 @@ int findLabelEnd(const Line& line, const std::string& label) {
             }
         }
         if (ok) return static_cast<int>(i + toks.size() - 1);
+    }
+    // Caso 3: bloques consecutivos cuya concatenacion (sin espacios)
+    // matchea label_join_up. Cubre casos donde OCR partio raro.
+    for (size_t i = 0; i < line.blocks.size(); ++i) {
+        std::string acc;
+        for (size_t j = i; j < line.blocks.size() && acc.size() <= label_join_up.size(); ++j) {
+            acc += toUpperAscii(line.blocks[j].text);
+            if (acc == label_join_up) return static_cast<int>(j);
+            if (acc.size() > label_join_up.size()) break;
+        }
     }
     return -1;
 }
@@ -196,12 +222,32 @@ std::string toISODate(const std::string& s) {
     return s;
 }
 
-// Parser numerico colombiano: "1.234.567,89" o "$ 1.234.567,89" -> 1234567.89
+// Parser numerico colombiano. IMPORTANTE: extrae SOLO el primer monto
+// del texto antes de delegar al parser legacy. Esto evita que dos numeros
+// consecutivos (ej. "$1.751.945,99 $602.561.945,99") se concatenen en un
+// solo numero gigante (resultaria 1.75e18). El parser legacy hace
+// "strip de puntos" y luego stod, que es vulnerable a esa concatenacion.
 double parseCOPNumber(const std::string& text) {
-    return DataStructurer::parseColombianNumber(text);
+    static const std::regex re_first(R"((-?[\d\.]+,\d{1,2}))");
+    std::smatch m;
+    if (std::regex_search(text, m, re_first)) {
+        return DataStructurer::parseColombianNumber(m.str());
+    }
+    // Fallback: numero entero sin decimales ("$1.000.000")
+    static const std::regex re_int(R"((-?\d{1,3}(?:\.\d{3})+))");
+    if (std::regex_search(text, m, re_int)) {
+        return DataStructurer::parseColombianNumber(m.str());
+    }
+    return 0.0;
 }
+// Mismo principio para porcentajes: tomar el primero.
 double parseCOPPercent(const std::string& text) {
-    return DataStructurer::parseColombianPercentage(text);
+    static const std::regex re_first(R"((-?[\d\.]+,\d{1,2}\s*%?))");
+    std::smatch m;
+    if (std::regex_search(text, m, re_first)) {
+        return DataStructurer::parseColombianPercentage(m.str());
+    }
+    return 0.0;
 }
 
 // Devuelve el "money-like" string en la linea, requiriendo signo $ para

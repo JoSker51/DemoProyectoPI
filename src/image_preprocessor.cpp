@@ -266,8 +266,10 @@ int ImagePreprocessor::detectOrientationOSD(const cv::Mat& img) {
         if (std::regex_search(out, cm, re_conf)) conf = std::stod(cm[1]);
         std::cout << "[ImagePreprocessor] OSD: rotate=" << deg
                   << "° confidence=" << conf << "\n";
-        // Tesseract OSD requiere confidence >= 1.0 para ser confiable
-        if (conf < 1.0) return -1;
+        // Threshold: 0.5 es buen compromiso — fotos con fondo texturado
+        // (madera, mesa) dan confianza menor que escaneos limpios pero
+        // aun asi es señal valida si OSD distingue una orientacion clara.
+        if (conf < 0.5) return -1;
         return deg;
     }
     if (out.find("osd.traineddata") != std::string::npos ||
