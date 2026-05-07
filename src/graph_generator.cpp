@@ -139,7 +139,7 @@ std::string GraphGenerator::generateYieldCurve(
     int W = 900, H = 600;
     cv::Mat img(H, W, CV_8UC3, cv::Scalar(255, 255, 255));
     drawTitle(img, "Yield Curve - Tasa de Valoracion vs Vencimiento");
-    drawSubtitle(img, "Solo instrumentos VIVOS. Linea roja: tendencia (regresion lineal).");
+    drawSubtitle(img, "Curva azul: rendimiento por plazo. Linea roja: tendencia. Solo instrumentos VIVOS.");
 
     if (cdts.empty()) {
         drawLabel(img, "(Sin datos de renta fija)", 50, H / 2, 0.7, cv::Scalar(120, 120, 120));
@@ -235,13 +235,6 @@ std::string GraphGenerator::generateYieldCurve(
     }
 
     // Regresion solo si los datos no son degenerados
-    double slope = 0, intercept = 0, r2 = 0;
-    bool reg_ok = false;
-    if (!dates_degenerate)
-        reg_ok = drawRegressionLine(img, plot, data, xmin, xmax, ymin, ymax,
-                                     slope, intercept, r2);
-
-    // Puntos
     auto map_x = [&](double x) {
         return plot.x + static_cast<int>((x - xmin) / (xmax - xmin) * plot.width);
     };
@@ -259,17 +252,49 @@ std::string GraphGenerator::generateYieldCurve(
         name_count[nm]++;
         labels.push_back(name_count[nm] > 1 ? nm + " #" + std::to_string(name_count[nm]) : nm);
     }
-    // Si todos terminaron con sufijo, retroactivamente al primero
     for (size_t i = 0; i < cdts.size(); ++i) {
         const std::string& nm = cdts[i].nemotecnico;
         if (name_count[nm] > 1 && labels[i] == nm) labels[i] = nm + " #1";
     }
 
+    // Ordenar los puntos por X (dias a vencimiento) para conectarlos
+    // como una verdadera CURVA de rendimiento. Mantenemos el mapeo al
+    // indice original de cdts para colores y etiquetas correctas.
+    struct DataPt { double x, y; size_t orig; };
+    std::vector<DataPt> sorted;
     for (size_t i = 0; i < data.size(); ++i) {
-        size_t orig = data_to_orig_idx[i];
-        const std::string& lbl = labels[orig];
-        cv::Point pt(map_x(data[i].x), map_y(data[i].y));
-        cv::circle(img, pt, 9, palette[orig % palette.size()], cv::FILLED, cv::LINE_AA);
+        sorted.push_back({data[i].x, data[i].y, data_to_orig_idx[i]});
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const DataPt& a, const DataPt& b) { return a.x < b.x; });
+
+    // Curva: linea conectando los puntos en orden de vencimiento.
+    // Esta es la forma estandar de una yield curve.
+    if (sorted.size() >= 2 && !dates_degenerate) {
+        // Color azul fuerte para distinguirla de la regresion roja
+        cv::Scalar curve_color(200, 100, 0);
+        for (size_t i = 1; i < sorted.size(); ++i) {
+            cv::Point p1(map_x(sorted[i - 1].x), map_y(sorted[i - 1].y));
+            cv::Point p2(map_x(sorted[i].x),     map_y(sorted[i].y));
+            cv::line(img, p1, p2, curve_color, 3, cv::LINE_AA);
+        }
+    }
+
+    // Linea de regresion (tendencia general) en color discreto, encima
+    // de la curva. Sirve para indicar si la curva es ascendente, plana
+    // o invertida en promedio.
+    double slope = 0, intercept = 0, r2 = 0;
+    bool reg_ok = false;
+    if (!dates_degenerate && sorted.size() >= 3) {
+        reg_ok = drawRegressionLine(img, plot, data, xmin, xmax, ymin, ymax,
+                                     slope, intercept, r2);
+    }
+
+    // Puntos encima de la linea para que sean visibles
+    for (const auto& dp : sorted) {
+        const std::string& lbl = labels[dp.orig];
+        cv::Point pt(map_x(dp.x), map_y(dp.y));
+        cv::circle(img, pt, 9, palette[dp.orig % palette.size()], cv::FILLED, cv::LINE_AA);
         cv::circle(img, pt, 9, cv::Scalar(40, 40, 40), 1, cv::LINE_AA);
         cv::Size lblSz = cv::getTextSize(lbl, cv::FONT_HERSHEY_SIMPLEX, 0.42, 1, nullptr);
         drawLabel(img, lbl, pt.x - lblSz.width / 2, pt.y - 14, 0.42,
