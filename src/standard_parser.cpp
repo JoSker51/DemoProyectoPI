@@ -375,14 +375,12 @@ double parseCOPNumber(const std::string& text) {
     }
     return 0.0;
 }
-// Mismo principio para porcentajes: tomar el primero.
+// Porcentajes: aceptar coma o punto como decimal (OCR confunde a veces).
+// Reusamos parseCOPNumber para extraer el primer numero, luego lo
+// retornamos tal cual (parseColombianPercentage hace lo mismo, pero
+// parseCOPNumber ya tiene la logica robusta para ambos separadores).
 double parseCOPPercent(const std::string& text) {
-    static const std::regex re_first(R"((-?[\d\.]+,\d{1,2}\s*%?))");
-    std::smatch m;
-    if (std::regex_search(text, m, re_first)) {
-        return DataStructurer::parseColombianPercentage(m.str());
-    }
-    return 0.0;
+    return parseCOPNumber(text);
 }
 
 // Devuelve el "money-like" string en la linea, requiriendo signo $ para
@@ -616,8 +614,11 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
             static const std::regex re_date(R"(\d{1,2}[-./ ]\d{1,2}[-./ ]\d{4})");
             // Percent: acepta coma o punto como decimal
             static const std::regex re_percent(R"([\d\.]+[,.]\d{1,2}\s*%)");
-            // Money: acepta coma o punto como decimal (OCR a veces confunde)
-            static const std::regex re_money(R"(\$\s*[\d\.\,]+[,.]\d{2})");
+            // Money: tolera (a) coma o punto como decimal y (b) espacios
+            // entre grupos de miles (cuando el OCR fragmenta el numero
+            // en bloques distintos: "$ 1 332.502.000,00").
+            static const std::regex re_money(
+                R"(\$\s*\d{1,3}(?:[\s.,]\d{3})*[,.]\d{2})");
 
             // Helpers para extraer todas las ocurrencias de un patron en
             // un texto. Las regex se aplican al TEXTO COMPLETO de la fila
