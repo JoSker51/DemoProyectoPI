@@ -724,14 +724,25 @@ bool StandardParser::parseAll(const std::vector<OCRResult>& ocr_data,
                     nemo += t;
                 }
 
-                // Periodicidad: bloque corto (1-3 chars) entre las fechas
-                // y los porcentajes. Ej. "TV", "MV", "AV", "CV".
+                // Periodicidad: bloque corto entre las fechas y los
+                // porcentajes. Ej. TV, MV, AV, CV, SV. Aceptamos OCR
+                // garbled donde Tesseract puede leer 'iv', 'Ty', 'IV'
+                // en vez de 'TV'. Heuristica: 2-3 caracteres y termina
+                // en V (cualquier caso).
                 for (const auto& b : row.blocks) {
+                    if (b.text.size() < 2 || b.text.size() > 3) continue;
                     std::string up = toUpperAscii(b.text);
-                    if (b.text.size() <= 3 &&
-                        (up == "TV" || up == "MV" || up == "AV" ||
-                         up == "CV" || up == "SV")) {
-                        period = b.text;
+                    if (up.empty()) continue;
+                    // Termina en V (caso valido) o algun match conocido
+                    bool ends_v = up.back() == 'V';
+                    bool known  = (up == "TV" || up == "MV" || up == "AV" ||
+                                    up == "CV" || up == "SV");
+                    if (known || ends_v) {
+                        // Si es match conocido o termina en V, asumimos
+                        // que es la periodicidad (probablemente "TV"
+                        // garbled). Normalizamos.
+                        if (known) period = up;
+                        else        period = "TV";   // mejor guess para "_V"
                         break;
                     }
                 }

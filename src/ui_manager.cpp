@@ -841,17 +841,26 @@ void MainFrame::updateFondosDisplay(const ExtractoCompleto& extracto) {
     };
 
     for (const auto& fondo : extracto.fondos) {
-        setRow("Nombre Fondo", fondo.nombre_fondo);
-        setRow("Codigo", fondo.codigo);
-        setRow("Inversionista", fondo.nombre_inversionista);
-        setRow("Identificacion", fondo.identificacion);
+        // Helper: solo agrega la fila si el valor (string) no esta vacio
+        auto setIfNonEmpty = [&](const std::string& campo, const std::string& valor) {
+            if (!valor.empty()) setRow(campo, valor);
+        };
+        setIfNonEmpty("Nombre Fondo",   fondo.nombre_fondo);
+        setIfNonEmpty("Codigo",         fondo.codigo);
+        setIfNonEmpty("Inversionista",  fondo.nombre_inversionista);
+        setIfNonEmpty("Identificacion", fondo.identificacion);
         setRow("Saldo Anterior", formatCOPMoney(fondo.saldo_anterior));
         setRow("Adiciones",      formatCOPMoney(fondo.adiciones));
         setRow("Retiros",        formatCOPMoney(fondo.retiros));
         setRow("Rendimientos",   formatCOPMoney(fondo.rendimientos));
         setRow("Nuevo Saldo",    formatCOPMoney(fondo.nuevo_saldo));
-        setRow("Unidades",       formatCOPNumber(fondo.unidades, 4));
-        setRow("Valor Unidad",   formatCOPMoney(fondo.valor_unidad_final));
+        // Unidades y Valor Unidad solo si vienen llenos del extracto
+        // (el template v1 no los incluye -> siempre 0 -> ocultar para
+        // no mostrar valores inventados).
+        if (fondo.unidades > 0)
+            setRow("Unidades", formatCOPNumber(fondo.unidades, 4));
+        if (fondo.valor_unidad_final > 0)
+            setRow("Valor Unidad", formatCOPMoney(fondo.valor_unidad_final));
 
         for (const auto& [periodo, val] : fondo.rentabilidades_historicas) {
             setRow("Rentab. " + periodo, formatCOPPercent(val));
