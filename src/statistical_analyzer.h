@@ -47,6 +47,7 @@ struct AdvancedMetrics {
     std::map<std::string, double> vencimientos_buckets;  // monto en $ por bucket
     std::map<std::string, int>    vencimientos_count;    // # CDTs por bucket
     double dias_promedio_vencimiento = 0.0;
+    int    n_vencidos = 0;  // CDTs excluidos del ladder por estar ya vencidos
 
     // --- Spreads facial vs valoracion por CDT ---
     std::map<std::string, double> spread_por_cdt_pct;

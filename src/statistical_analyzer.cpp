@@ -525,11 +525,10 @@ AdvancedMetrics StatisticalAnalyzer::computeAdvanced(
 
     // ---------- 4. Vencimientos por bucket ----------
     // Usa la misma fecha de referencia (fecha_extracto) ya calculada arriba.
-    // Los expirados van a un bucket "Vencidos" propio para que el usuario
-    // los vea aparte (no inflar el bucket <90d con instrumentos ya
-    // vencidos y dias=0 — eso oculta el problema real).
+    // Los instrumentos vencidos se EXCLUYEN del ladder: el maturity ladder
+    // es una herramienta de planificacion de liquidez futura; incluir
+    // vencidos distorsiona la lectura. Se cuentan aparte para el footer.
     auto label_for = [&](int dias) -> std::string {
-        if (dias <= 0)               return "Vencidos";
         if (dias < cfg.dias_corto)   return "<" + std::to_string(cfg.dias_corto) + "d";
         if (dias < cfg.dias_medio)   return std::to_string(cfg.dias_corto) + "-" +
                                             std::to_string(cfg.dias_medio) + "d";
@@ -540,19 +539,23 @@ AdvancedMetrics StatisticalAnalyzer::computeAdvanced(
 
     double weighted_dias = 0.0;
     double total_no_expired = 0.0;
+    int n_vencidos = 0;
     for (const auto& cdt : extracto.renta_fija) {
         int dias = diasEntreFechasISO(today, cdt.fecha_vencimiento);
+        if (dias <= 0) {
+            n_vencidos++;
+            continue;   // excluir del ladder
+        }
         std::string b = label_for(dias);
         m.vencimientos_buckets[b] += cdt.valor_mercado;
         m.vencimientos_count[b]   += 1;
-        if (dias > 0) {
-            total_no_expired += cdt.valor_mercado;
-            weighted_dias += cdt.valor_mercado * dias;
-        }
+        total_no_expired += cdt.valor_mercado;
+        weighted_dias += cdt.valor_mercado * dias;
     }
     // dias_promedio: ponderado solo sobre instrumentos vivos (sin expirados)
     m.dias_promedio_vencimiento = total_no_expired > 0 ?
                                     weighted_dias / total_no_expired : 0.0;
+    m.n_vencidos = n_vencidos;
 
     // ---------- 5. FIC: Sharpe y rentabilidad ----------
     if (!extracto.fondos.empty()) {

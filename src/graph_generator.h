@@ -23,18 +23,23 @@ public:
 
     // ===== Las 6 graficas nuevas =====
 
-    // 1. Yield Curve: tasa de valoracion vs dias a vencimiento.
-    //    Cada CDT es un punto. Linea de regresion lineal opcional.
-    //    `reference_date` (ISO YYYY-MM-DD) define desde donde se cuentan
-    //    los dias al vencimiento. Si esta vacio, usa hoy como fallback.
+    // 1. Yield Curve: tasa de valoracion vs ANOS a vencimiento (dias/365).
+    //    Cada CDT vivo es un punto. Linea de regresion solo si n >= 3
+    //    (con n < 3 es trivialmente perfecta y no aporta informacion).
+    //    `reference_date` (ISO YYYY-MM-DD) define la fecha base desde la
+    //    que se calculan los anos al vencimiento. Si esta vacio, usa la
+    //    fecha del sistema como fallback.
     //    Los instrumentos ya vencidos (vto <= ref) se excluyen del scatter
-    //    y se reportan en una nota debajo de la grafica.
+    //    y se reportan en una nota al pie de la grafica.
     std::string generateYieldCurve(
         const std::vector<InstrumentoRentaFija>& cdts,
         const std::string& reference_date,
         const std::string& output_path);
 
-    // 2. Maturity Ladder: monto $ en cada bucket de vencimiento.
+    // 2. Maturity Ladder: monto COP en cada bucket de vencimiento.
+    //    Eje Y etiquetado en COP. Footer muestra vencimiento promedio
+    //    ponderado en anos; si supera 30 anos emite aviso en rojo
+    //    (indica posibles fechas de vencimiento incorrectas en los datos).
     //    Apoya planeacion de liquidez.
     std::string generateMaturityLadder(
         const AdvancedMetrics& adv,
@@ -48,6 +53,9 @@ public:
         const std::string& output_path);
 
     // 4. Boxplot de tasas de valoracion: cuartiles, mediana, whiskers, outliers.
+    //    Si n < 5, un boxplot no tiene validez estadistica (Q1/Q3 colapsan,
+    //    skewness/kurtosis son trivialmente 0). En ese caso se sustituye
+    //    por un scatter de valores individuales con etiqueta de nemotecnico.
     std::string generateBoxplotTasas(
         const std::vector<InstrumentoRentaFija>& cdts,
         const AnalysisResult& analysis,
@@ -83,9 +91,10 @@ private:
     static cv::Rect drawAxes(cv::Mat& img, int margin_left, int margin_right,
                               int margin_top, int margin_bottom);
     // Dibuja una linea de regresion lineal (least squares) sobre puntos (x, y)
-    // dentro del rect plot. Devuelve true si la calculo.
+    // dentro del rect plot. Solo llamar cuando pts.size() >= 3.
+    // Devuelve true si pudo calcularla (den != 0).
     static bool drawRegressionLine(cv::Mat& img, const cv::Rect& plot,
-                                    const std::vector<cv::Point2d>& pts_data,
+                                    const std::vector<cv::Point2d>& pts,
                                     double xmin, double xmax,
                                     double ymin, double ymax,
                                     double& out_slope, double& out_intercept,

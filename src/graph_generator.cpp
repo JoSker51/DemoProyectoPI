@@ -139,7 +139,7 @@ std::string GraphGenerator::generateYieldCurve(
     int W = 900, H = 600;
     cv::Mat img(H, W, CV_8UC3, cv::Scalar(255, 255, 255));
     drawTitle(img, "Yield Curve - Tasa de Valoracion vs Vencimiento");
-    drawSubtitle(img, "Curva azul: rendimiento por plazo. Linea roja: tendencia. Solo instrumentos VIVOS.");
+    drawSubtitle(img, "Rendimiento por plazo (anos). Tendencia solo si n >= 3. Solo instrumentos VIVOS.");
 
     if (cdts.empty()) {
         drawLabel(img, "(Sin datos de renta fija)", 50, H / 2, 0.7, cv::Scalar(120, 120, 120));
@@ -210,19 +210,26 @@ std::string GraphGenerator::generateYieldCurve(
     ymin = std::max(0.0, ymin - ypad); ymax += ypad;
 
     cv::Rect plot = drawAxes(img, 110, 60, 90, 90);
-    drawLabel(img, "Dias a vencimiento", plot.x + plot.width / 2 - 70,
+    drawLabel(img, "Anos a vencimiento", plot.x + plot.width / 2 - 70,
               plot.y + plot.height + 60, 0.55, cv::Scalar(60, 60, 60));
     drawLabel(img, "Tasa Valoracion (%)", 15, plot.y + plot.height / 2,
               0.55, cv::Scalar(60, 60, 60));
 
-    // Eje X: ticks unicos enteros
+    // Eje X: convertir dias a años para legibilidad (xmin/xmax siguen en dias internamente)
     std::set<int> seen_x;
     for (int i = 0; i <= 5; ++i) {
-        double xv = xmin + (xmax - xmin) * i / 5;
-        int xint  = static_cast<int>(std::round(xv));
+        double xv_dias = xmin + (xmax - xmin) * i / 5;
+        double xv_anos = xv_dias / 365.0;
+        // Mostrar con 1 decimal si < 5 años, entero si > 5
+        std::ostringstream xtick;
+        if (xv_anos < 5.0) xtick << std::fixed << std::setprecision(1) << xv_anos;
+        else                xtick << std::fixed << std::setprecision(0) << xv_anos;
+        std::string xtick_str = xtick.str();
+        // Evitar duplicados visualmente
+        int xint = static_cast<int>(std::round(xv_anos * 10));
         if (!seen_x.insert(xint).second) continue;
         int xpix = plot.x + plot.width * i / 5;
-        drawLabel(img, std::to_string(xint), xpix - 12, plot.y + plot.height + 22, 0.45);
+        drawLabel(img, xtick_str, xpix - 12, plot.y + plot.height + 22, 0.45);
         cv::line(img, cv::Point(xpix, plot.y + plot.height),
                        cv::Point(xpix, plot.y + plot.height + 5),
                        cv::Scalar(60, 60, 60), 1);
@@ -283,6 +290,9 @@ std::string GraphGenerator::generateYieldCurve(
     // Linea de regresion (tendencia general) en color discreto, encima
     // de la curva. Sirve para indicar si la curva es ascendente, plana
     // o invertida en promedio.
+    // Linea de regresion (tendencia general): solo si hay >= 3 instrumentos
+    // Con n=2 la recta siempre pasa exactamente por los dos puntos (R²=1 trivial)
+    // y no aporta informacion; ocultarla evita confusion.
     double slope = 0, intercept = 0, r2 = 0;
     bool reg_ok = false;
     if (!dates_degenerate && sorted.size() >= 3) {
@@ -366,7 +376,7 @@ std::string GraphGenerator::generateMaturityLadder(
     cv::Rect plot = drawAxes(img, 100, 60, 90, 130);  // mas margen abajo
     drawLabel(img, "Bucket de vencimiento", plot.x + plot.width / 2 - 90,
               plot.y + plot.height + 80, 0.55, cv::Scalar(60, 60, 60));
-    drawLabel(img, "Monto", 30, plot.y + plot.height / 2, 0.55, cv::Scalar(60, 60, 60));
+    drawLabel(img, "Monto (COP)", 10, plot.y + plot.height / 2, 0.55, cv::Scalar(60, 60, 60));
 
     double maxv = 0;
     for (const auto& b : buckets) maxv = std::max(maxv, adv.vencimientos_buckets.at(b));
@@ -401,13 +411,21 @@ std::string GraphGenerator::generateMaturityLadder(
                   cv::Scalar(120, 120, 120));
     }
 
-    // Footer: dias promedio
-    std::ostringstream oss;
-    oss << "Dias promedio ponderados a vencimiento: "
-        << std::fixed << std::setprecision(0) << adv.dias_promedio_vencimiento
-        << " dias  ("
-        << std::setprecision(2) << adv.dias_promedio_vencimiento / 365.0 << " anos)";
-    drawLabel(img, oss.str(), 80, H - 20, 0.5, colorAccent(), 1);
+    // Footer: vencimiento promedio en años + nota de vencidos excluidos
+    {
+        double anos = adv.dias_promedio_vencimiento / 365.0;
+        std::ostringstream oss;
+        oss << "Vencimiento promedio ponderado: "
+            << std::fixed << std::setprecision(1) << anos << " anos";
+        if (adv.n_vencidos > 0)
+            oss << "  (" << adv.n_vencidos << " CDT vencido(s) excluido(s))";
+        if (anos > 30.0) {
+            oss << "  [AVISO: verificar fechas de vencimiento en los datos]";
+            drawLabel(img, oss.str(), 30, H - 20, 0.45, colorNegative(), 1);
+        } else {
+            drawLabel(img, oss.str(), 50, H - 20, 0.5, colorAccent(), 1);
+        }
+    }
 
     cv::imwrite(output_path, img);
     return output_path;
@@ -572,9 +590,35 @@ std::string GraphGenerator::generateBoxplotTasas(
 
     std::vector<double> v;
     for (const auto& c : cdts) v.push_back(c.tasa_valoracion);
-    if (v.size() < 2) {
-        drawLabel(img, "(No hay suficientes datos)", 50, H / 2, 0.7,
-                  cv::Scalar(120, 120, 120));
+
+    // Con n < 5 un boxplot no tiene validez estadistica: Q1/Q3 colapsan,
+    // skewness y kurtosis son trivialmente 0, y los whiskers no dicen nada.
+    // En ese caso mostramos un scatter simple mas honesto.
+    if (v.size() < 5) {
+        if (v.empty()) {
+            drawLabel(img, "(No hay datos de renta fija)", 50, H / 2, 0.7,
+                      cv::Scalar(120, 120, 120));
+        } else {
+            drawLabel(img, "Muestra insuficiente para boxplot (n < 5).",
+                      60, H / 2 - 50, 0.6, colorWarning(), 1);
+            drawLabel(img, "Se muestran los valores individuales:",
+                      60, H / 2 - 20, 0.55, cv::Scalar(80, 80, 80));
+            // Mostrar cada punto con su etiqueta
+            std::sort(v.begin(), v.end());
+            int xc = W / 2;
+            int y_base = H / 2 + 20;
+            int spacing = 40;
+            for (size_t i = 0; i < v.size(); ++i) {
+                int yi = y_base + static_cast<int>(i) * spacing;
+                cv::circle(img, cv::Point(xc, yi), 8, colorAccent(), cv::FILLED, cv::LINE_AA);
+                std::string lbl = formatPct(v[i], 2) + "  (" +
+                    (cdts.size() > i ? cdts[i].nemotecnico : "") + ")";
+                drawLabel(img, lbl, xc + 20, yi + 5, 0.52, cv::Scalar(40, 40, 40));
+            }
+            std::ostringstream footer;
+            footer << "n=" << v.size() << "  - se necesitan al menos 5 datos para un boxplot valido";
+            drawLabel(img, footer.str(), 60, H - 20, 0.48, cv::Scalar(120, 120, 120));
+        }
         cv::imwrite(output_path, img);
         return output_path;
     }
